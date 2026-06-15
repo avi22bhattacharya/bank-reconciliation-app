@@ -5,18 +5,18 @@ Launch:  .env/bin/streamlit run app.py
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import hashlib
 import io
 import tempfile
 import traceback
-import uuid
 from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
 
-from core import db, ingest, persist, prior_items, storage
+from core import db, ingest, persist, prior_items
 from core import pipeline_ma, pipeline_yardi
 from core.auth import require_login
 
@@ -290,23 +290,26 @@ if run_clicked:
                         prop=prop, period=period, prior=prior)
 
             status.update(label="Saving results…")
-            run_uuid = uuid.uuid4().hex
             output_filename = Path(out["output_path"]).name
-            ext = "json" if gl_type == "yardi" else "pkl"
 
-            results_key = storage.upload(
-                out["results_path"],
-                f"{property_code}/{period}/{run_uuid}/results.{ext}")
-            output_key = storage.upload(
-                out["output_path"],
-                f"{property_code}/{period}/{run_uuid}/{output_filename}")
+            if gl_type == "yardi":
+                import json as _json
+                results_data = _json.dumps(out["results"])
+            else:
+                results_data = base64.b64encode(
+                    Path(out["results_path"]).read_bytes()).decode()
+
+            output_bytes = Path(out["output_path"]).read_bytes()
 
             run_id = persist.save_run(
                 con, property_code=property_code, gl_type=gl_type, period=period,
                 results=out["results"], prior_source=prior_source,
                 prior_refs=out["prior_refs"], workdir="",
-                results_path=results_key, output_path=output_key,
-                stats=out["stats"])
+                results_path="", output_path=output_filename,
+                stats=out["stats"], results_data=results_data)
+
+            st.session_state["last_output_bytes"] = output_bytes
+            st.session_state["last_output_filename"] = output_filename
             status.update(label="Reconciliation complete", state="complete")
 
         st.session_state["last_run_sig"] = run_sig
@@ -339,15 +342,16 @@ if run_id:
             m3.metric("GL matched", f"{stats.get('total_matched_gl','—')}/{stats.get('total_gl_all','—')}")
             m4.metric("GL match rate", f"{stats.get('pct_gl',0):.1f}%")
 
-        try:
-            output_data = storage.read_bytes(run["output_path"])
+        output_bytes = st.session_state.get("last_output_bytes")
+        output_filename = st.session_state.get("last_output_filename") or run["output_path"] or "reconciliation.xlsx"
+        if output_bytes:
             st.download_button("⬇️ Download reconciliation workbook",
-                               data=output_data,
-                               file_name=Path(run["output_path"]).name,
+                               data=output_bytes,
+                               file_name=output_filename,
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                use_container_width=True)
-        except Exception:
-            st.warning("Output file not available for download.")
+        else:
+            st.warning("Output file not available — re-run the reconciliation to download.")
 
         ub = len(db.unmatched_bank(con, run["property_code"]))
         ug = len(db.unmatched_gl(con, run["property_code"]))

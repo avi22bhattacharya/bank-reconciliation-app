@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import contextlib
 import io
-from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-from core import db, regenerate, storage
+from core import db, regenerate
 from core.auth import require_login
 
 st.set_page_config(page_title="Manual Matching", page_icon="🔗", layout="wide")
@@ -111,21 +110,18 @@ if st.button("Confirm match", type="primary", disabled=not (balanced or force),
     log = io.StringIO()
     try:
         with contextlib.redirect_stdout(log):
-            out_key = regenerate.rebuild_output(con, latest["run_id"])
-        st.session_state["regen_key"] = out_key
+            regen_bytes, regen_filename = regenerate.rebuild_output(con, latest["run_id"])
+        st.session_state["regen_bytes"] = regen_bytes
+        st.session_state["regen_filename"] = regen_filename
         st.success(f"Match #{match_id} recorded ({len(bank_hashes)} bank ↔ "
                    f"{len(gl_hashes)} GL). Output workbook regenerated.")
     except Exception as e:
         st.error(f"Match #{match_id} saved, but regenerating the workbook failed: {e}")
     st.rerun()
 
-if st.session_state.get("regen_key"):
-    key = st.session_state["regen_key"]
-    try:
-        data = storage.read_bytes(key)
-        st.download_button("⬇️ Download updated workbook", data=data,
-                           file_name=Path(key).name,
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                           use_container_width=True)
-    except Exception:
-        st.warning("Regenerated file not available for download.")
+if st.session_state.get("regen_bytes"):
+    st.download_button("⬇️ Download updated workbook",
+                       data=st.session_state["regen_bytes"],
+                       file_name=st.session_state.get("regen_filename", "reconciliation.xlsx"),
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       use_container_width=True)

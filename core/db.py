@@ -26,6 +26,14 @@ from pathlib import Path
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
 
+_MIGRATION_PG = """
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS results_data TEXT;
+"""
+
+_MIGRATION_SQLITE = """
+ALTER TABLE runs ADD COLUMN results_data TEXT;
+"""
+
 _SCHEMA_PG = """
 CREATE TABLE IF NOT EXISTS properties (
     property_code   TEXT PRIMARY KEY,
@@ -48,7 +56,8 @@ CREATE TABLE IF NOT EXISTS runs (
     workdir       TEXT,
     results_path  TEXT,
     output_path   TEXT,
-    stats_json    TEXT
+    stats_json    TEXT,
+    results_data  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS matches (
@@ -155,9 +164,20 @@ class _Conn:
                 s = stmt.strip()
                 if s:
                     cur.execute(s)
+            # Migration: add results_data column to existing tables
+            try:
+                cur.execute("ALTER TABLE runs ADD COLUMN IF NOT EXISTS results_data TEXT")
+            except Exception:
+                pass
             self._raw.commit()
         else:
             self._raw.executescript(schema)
+            # Migration: add results_data column to existing SQLite table
+            try:
+                self._raw.execute("ALTER TABLE runs ADD COLUMN results_data TEXT")
+                self._raw.commit()
+            except Exception:
+                pass
 
     def execute(self, sql: str, params=None) -> _Cursor:
         if self._is_pg:

@@ -9,13 +9,14 @@ if the engine had made them, and the original writer regenerates the file.
 
 from __future__ import annotations
 
+import base64
 import json
 import pickle
 import tempfile
 from datetime import date
 from pathlib import Path
 
-from core import db, storage
+from core import db
 from engines.ma import build_excel
 from engines.yardi import write_output_ph
 
@@ -107,9 +108,9 @@ def _overlay_ma(results: dict, groups: list[dict]):
     return results
 
 
-def rebuild_output(con, run_id: int) -> str:
+def rebuild_output(con, run_id: int) -> tuple[bytes, str]:
     """Regenerate the run's output workbook including its manual matches.
-    Returns the output path (local) or S3 key (cloud)."""
+    Returns (xlsx_bytes, filename)."""
     run = con.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
     if run is None:
         raise ValueError(f"run {run_id} not found")
@@ -117,19 +118,20 @@ def rebuild_output(con, run_id: int) -> str:
     groups = _manual_match_members(con, run_id)
     stats = db.run_stats(run)
 
-    results_data = storage.read_bytes(run["results_path"])
-    output_key = run["output_path"]
+    stored = run["results_data"] or ""
+    if not stored:
+        raise ValueError("No results_data stored for this run — re-run the reconciliation.")
 
     with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
         tmp_path = tmp.name
 
     try:
         if run["gl_type"] == "yardi":
-            results = json.loads(results_data)
+            results = json.loads(stored)
             results = _overlay_yardi(results, groups)
             write_output_ph.run(results, tmp_path, prop)
         else:
-            results = pickle.loads(results_data)
+            results = pickle.loads(base64.b64decode(stored))
             results = _overlay_ma(results, groups)
             y, m = (int(x) for x in run["period"].split("-"))
             build_excel.run(
@@ -142,15 +144,8 @@ def rebuild_output(con, run_id: int) -> str:
                 period_start=date(y, m, 1),
                 beginning_balance=stats.get("beginning_balance", 0.0))
 
-        if storage.is_cloud():
-            storage.upload(tmp_path, output_key)
-            return output_key
-        else:
-            # Local dev: write directly to the stored output path
-            import shutil
-            shutil.move(tmp_path, output_key)
-            tmp_path = None  # don't delete in finally
-            return output_key
+        xlsx_bytes = Path(tmp_path).read_bytes()
+        filename = Path(run["output_path"]).name if run["output_path"] else f"reconciliation_{run_id}.xlsx"
+        return xlsx_bytes, filename
     finally:
-        if tmp_path:
-            Path(tmp_path).unlink(missing_ok=True)
+        Path(tmp_path).unlink(missing_ok=True)

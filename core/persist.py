@@ -254,7 +254,7 @@ def _persist_ma(con, property_code, period, run_id, results, prior_refs):
 def save_run(con, *, property_code: str, gl_type: str, period: str,
              results: dict, prior_source: str, prior_refs: dict | None = None,
              workdir: str = "", results_path: str = "", output_path: str = "",
-             stats: dict | None = None) -> int:
+             stats: dict | None = None, results_data: str = "") -> int:
     """Persist one reconciliation run atomically. Returns run_id.
 
     prior_refs maps engine record keys to existing txn_hashes for injected
@@ -266,12 +266,13 @@ def save_run(con, *, property_code: str, gl_type: str, period: str,
         _supersede(con, property_code, period)
         cur = con.execute("""
             INSERT INTO runs (property_code, gl_type, period, run_at, status,
-                              prior_source, workdir, results_path, output_path, stats_json)
-            VALUES (?,?,?,?,?,?,?,?,?,?) RETURNING run_id
+                              prior_source, workdir, results_path, output_path,
+                              stats_json, results_data)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?) RETURNING run_id
         """, (property_code, gl_type, period,
               datetime.now().isoformat(timespec="seconds"), "complete", prior_source,
               str(workdir), str(results_path), str(output_path),
-              json.dumps(stats or {})))
+              json.dumps(stats or {}), results_data))
         run_id = cur.lastrowid
 
         if gl_type == "yardi":
