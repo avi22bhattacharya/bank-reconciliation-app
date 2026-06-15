@@ -1,7 +1,10 @@
-"""Persistent file storage: S3 in production, local filesystem in dev.
+"""Persistent file storage: Supabase Storage in production, local filesystem in dev.
 
-Detects mode via st.secrets["aws"]. When aws secrets are absent (local dev),
-every function falls back to plain filesystem I/O using the path as-is.
+Detects mode via st.secrets["supabase"]. When absent (local dev), every
+function falls back to plain filesystem I/O using the path as-is.
+
+Supabase setup: create a private bucket in your project's Storage dashboard
+and put the bucket name in st.secrets["supabase"]["bucket"].
 """
 
 from __future__ import annotations
@@ -11,7 +14,7 @@ from pathlib import Path
 
 def _cfg():
     import streamlit as st
-    return st.secrets.get("aws", {})
+    return st.secrets.get("supabase", {})
 
 
 def is_cloud() -> bool:
@@ -22,14 +25,9 @@ def is_cloud() -> bool:
 
 
 def _client():
-    import boto3
+    from supabase import create_client
     cfg = _cfg()
-    return boto3.client(
-        "s3",
-        aws_access_key_id=cfg["access_key_id"],
-        aws_secret_access_key=cfg["secret_access_key"],
-        region_name=cfg["region"],
-    )
+    return create_client(cfg["url"], cfg["key"])
 
 
 def _bucket() -> str:
@@ -37,17 +35,20 @@ def _bucket() -> str:
 
 
 def upload(local_path: str | Path, key: str) -> str:
-    """Upload local_path to S3 key. Returns key.
+    """Upload local_path to Supabase Storage at key. Returns key.
     No-op in local dev (returns local_path unchanged)."""
     if not is_cloud():
         return str(local_path)
-    _client().upload_file(str(local_path), _bucket(), key)
+    data = Path(local_path).read_bytes()
+    _client().storage.from_(_bucket()).upload(
+        key, data,
+        file_options={"content-type": "application/octet-stream", "upsert": "true"},
+    )
     return key
 
 
 def read_bytes(path_or_key: str) -> bytes:
-    """Read a file from S3 (cloud) or local filesystem (dev)."""
+    """Read a file from Supabase Storage (cloud) or local filesystem (dev)."""
     if is_cloud():
-        obj = _client().get_object(Bucket=_bucket(), Key=path_or_key)
-        return obj["Body"].read()
+        return bytes(_client().storage.from_(_bucket()).download(path_or_key))
     return Path(path_or_key).read_bytes()
