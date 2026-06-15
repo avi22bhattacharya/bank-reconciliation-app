@@ -128,9 +128,15 @@ class _Cursor:
     def execute(self, sql: str, params=None):
         actual = sql.replace("?", "%s") if self._is_pg else sql
         self._c.execute(actual, params or ())
-        if self._is_pg and "RETURNING" in sql.upper():
+        if "RETURNING" in sql.upper():
+            # Fetch the RETURNING row for both backends — SQLite leaves the
+            # cursor in "SQL statements in progress" if the row isn't consumed,
+            # which blocks any subsequent commit() on the connection.
             row = self._c.fetchone()
-            self.lastrowid = list(row.values())[0] if row else None
+            if self._is_pg:
+                self.lastrowid = list(row.values())[0] if row else None
+            else:
+                self.lastrowid = row[0] if row else getattr(self._c, "lastrowid", None)
         else:
             self.lastrowid = getattr(self._c, "lastrowid", None)
         return self
