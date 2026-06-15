@@ -1,10 +1,7 @@
 """Persistent file storage: Supabase Storage in production, local filesystem in dev.
 
-Detects mode via st.secrets["supabase"]. When absent (local dev), every
-function falls back to plain filesystem I/O using the path as-is.
-
-Supabase setup: create a private bucket in your project's Storage dashboard
-and put the bucket name in st.secrets["supabase"]["bucket"].
+Uses the Supabase Storage REST API directly via httpx to avoid initialisation
+issues in the supabase-py client. Detects mode via st.secrets["supabase"].
 """
 
 from __future__ import annotations
@@ -12,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def _cfg():
+def _cfg() -> dict:
     import streamlit as st
     return st.secrets.get("supabase", {})
 
@@ -24,14 +21,14 @@ def is_cloud() -> bool:
         return False
 
 
-def _client():
-    from supabase import create_client
+def _headers() -> dict:
+    key = _cfg()["key"]
+    return {"apikey": key, "Authorization": f"Bearer {key}"}
+
+
+def _object_url(key: str) -> str:
     cfg = _cfg()
-    return create_client(cfg["url"], cfg["key"])
-
-
-def _bucket() -> str:
-    return _cfg()["bucket"]
+    return f"{cfg['url']}/storage/v1/object/{cfg['bucket']}/{key}"
 
 
 def upload(local_path: str | Path, key: str) -> str:
@@ -39,16 +36,25 @@ def upload(local_path: str | Path, key: str) -> str:
     No-op in local dev (returns local_path unchanged)."""
     if not is_cloud():
         return str(local_path)
+    import httpx
     data = Path(local_path).read_bytes()
-    _client().storage.from_(_bucket()).upload(
-        key, data,
-        file_options={"content-type": "application/octet-stream", "upsert": "true"},
-    )
+    headers = {
+        **_headers(),
+        "Content-Type": "application/octet-stream",
+        "x-upsert": "true",
+    }
+    with httpx.Client(timeout=60) as client:
+        r = client.post(_object_url(key), content=data, headers=headers)
+        r.raise_for_status()
     return key
 
 
 def read_bytes(path_or_key: str) -> bytes:
     """Read a file from Supabase Storage (cloud) or local filesystem (dev)."""
     if is_cloud():
-        return bytes(_client().storage.from_(_bucket()).download(path_or_key))
+        import httpx
+        with httpx.Client(timeout=60) as client:
+            r = client.get(_object_url(path_or_key), headers=_headers())
+            r.raise_for_status()
+        return r.content
     return Path(path_or_key).read_bytes()
