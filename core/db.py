@@ -126,6 +126,10 @@ class _Cursor:
             self.lastrowid = getattr(self._c, "lastrowid", None)
         return self
 
+    @property
+    def rowcount(self):
+        return self._c.rowcount
+
     def fetchone(self):
         return self._c.fetchone()
 

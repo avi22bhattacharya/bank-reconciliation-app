@@ -57,8 +57,12 @@ else:
                "Rows sharing a Match # were reconciled together.")
     st.dataframe(df, hide_index=True, height=480,
                  column_config={"Amount": st.column_config.NumberColumn(format="%.2f")})
-    st.download_button("⬇️ Export CSV", data=df.to_csv(index=False).encode(),
-                       file_name=f"matched_{prop_code}.csv", mime="text/csv")
+    import io as _io
+    _buf = _io.BytesIO()
+    df.to_excel(_buf, index=False, engine="openpyxl")
+    st.download_button("⬇️ Export Excel", data=_buf.getvalue(),
+                       file_name=f"matched_{prop_code}.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 st.divider()
 st.subheader("Run history")

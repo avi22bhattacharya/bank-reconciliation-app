@@ -190,7 +190,6 @@ def build_summary(wb, r, prop):
     ws.cell(row=4, column=2).number_format = "MM/DD/YYYY"
 
     wc(5, 2, "Bank Information", bold=True)
-    wc(5, 9, "Bank transitions", italic=True, color="595959")
 
     # ── Bank section ─────────────────────────────────────────────────────────
     wc(7, 6, "Balance per bank at the month end")
@@ -243,12 +242,9 @@ def build_summary(wb, r, prop):
     c = ws.cell(row=7, column=8, value=bank_ending)
     c.number_format = '#,##0.00;[Red]-#,##0.00'
     c.alignment = Alignment(horizontal="right")
-    wc(7, 9, "The bank's closing balance (which we update from the bank statement downloaded from Wells Fargo Bank).",
-       italic=True, color="595959")
 
     # Outstanding bank deposits section
     wc(9, 2, "Outstanding Bank Deposits:", bold=True)
-    wc(10, 9, "If available, bank deposit outstanding items updates here", italic=True, color="595959")
 
     dep_data_start = 11
     dep_data_end   = dep_data_start - 1
@@ -265,7 +261,6 @@ def build_summary(wb, r, prop):
     wc(total_dep_row, 6, "Total")
     c = ws.cell(row=total_dep_row, column=7, value=total_unrec_bank_dep)
     c.number_format = '#,##0.00;[Red]-#,##0.00'
-    wc(total_dep_row, 9, "Total Deposits", italic=True, color="595959")
 
     # Outstanding bank withdrawals section
     dis_hdr_row = total_dep_row + 1
@@ -281,48 +276,38 @@ def build_summary(wb, r, prop):
         ws.cell(row=row, column=5, value=b.get("description", ""))
         c = ws.cell(row=row, column=7, value=b.get("amount", 0))
         c.number_format = '#,##0.00;[Red]-#,##0.00'
-        if row == dis_data_start:
-            wc(row, 9, "Bank Withdrawal outstanding items updates here", italic=True, color="595959")
 
     total_wit_row = dis_data_end + 2
     wc(total_wit_row, 6, "Total")
     c = ws.cell(row=total_wit_row, column=7, value=total_unrec_bank_with)
     c.number_format = '#,##0.00;[Red]-#,##0.00'
-    wc(total_wit_row, 9, "Total Withdrawal", italic=True, color="595959")
 
     outstanding_row = total_wit_row + 2
     wc(outstanding_row, 6, "Outstanding items total")
     c = ws.cell(row=outstanding_row, column=8, value=total_outstanding_bank)
     c.number_format = '#,##0.00;[Red]-#,##0.00'
-    wc(outstanding_row, 9, "Total Outstanding (Deposits + Withdrawal)", italic=True, color="595959")
 
     adj_bank_row = outstanding_row + 2
     wc(adj_bank_row, 6, "Adjusted bank balance", bold=True)
     c = ws.cell(row=adj_bank_row, column=8, value=adjusted_bank)
     c.number_format = '#,##0.00;[Red]-#,##0.00'
     c.font = Font(bold=True)
-    wc(adj_bank_row, 9, "Total (Bank's closing balance - Total Outstanding)", italic=True, color="595959")
 
     # ── GL section ────────────────────────────────────────────────────────────
     gl_hdr_row = adj_bank_row + 2
     gl_acct_prefix = prop.gl_account_id.split()[0] if prop.gl_account_id else ""
     wc(gl_hdr_row, 2, f"General Ledger Information - {gl_acct_prefix} {prop.property_name}", bold=True)
-    wc(gl_hdr_row, 9, "GL transitions", italic=True, color="595959")
 
     gl_bal_row = gl_hdr_row + 2
     wc(gl_bal_row, 6, " Balance per TB at the month end")
     c = ws.cell(row=gl_bal_row, column=8, value=gl_ending)
     c.number_format = '#,##0.00;[Red]-#,##0.00'
-    wc(gl_bal_row, 9, "The GL's closing  balance (which we update from the GL tab or the GL file downloaded from Yardi).",
-       italic=True, color="595959")
 
     p_label = period_label(period_date) if period_date else ""
 
     # ── Prior-period outstanding deposits ────────────────────────────────────
     prev_dep_hdr = gl_bal_row + 2
     wc(prev_dep_hdr, 2, "Un-reconcile Outstanding Deposits:", bold=True)
-    wc(prev_dep_hdr + 1, 9, "If available, previous month's GL deposit outstanding items updates here",
-       italic=True, color="595959")
 
     prev_dep_data_end = prev_dep_hdr + 1
     for item in prev_dep_groups:
@@ -344,7 +329,6 @@ def build_summary(wb, r, prop):
     curr_dep_data_start = curr_dep_hdr + 2
     curr_dep_data_end   = curr_dep_data_start - 1
 
-    first_curr_dep_note = True
     for item in curr_dep_groups:
         row = curr_dep_data_end + 1
         curr_dep_data_end = row
@@ -356,16 +340,11 @@ def build_summary(wb, r, prop):
         ws.cell(row=row, column=5, value=item["desc"])
         c = ws.cell(row=row, column=7, value=item["amount"])
         c.number_format = '#,##0.00;[Red]-#,##0.00'
-        if first_curr_dep_note:
-            wc(row, 9, "Reporting month's GL deposit outstanding items updates here",
-               italic=True, color="595959")
-            first_curr_dep_note = False
 
     total_gl_dep_row = curr_dep_data_end + 2
     wc(total_gl_dep_row, 6, "Total")
     c = ws.cell(row=total_gl_dep_row, column=7, value=total_unrec_gl_dep)
     c.number_format = '#,##0.00;[Red]-#,##0.00'
-    wc(total_gl_dep_row, 9, "Total Deposits", italic=True, color="595959")
 
     # ── Prior-period outstanding disbursements ────────────────────────────────
     ws.cell(row=total_gl_dep_row + 1, column=1, value=" ")
@@ -373,7 +352,6 @@ def build_summary(wb, r, prop):
     wc(prev_wit_hdr, 2, "Un-reconciled Outstanding Disbursement:", bold=True)
 
     prev_wit_data_end = prev_wit_hdr + 1
-    first_prev_wit_note = True
     for item in prev_wit_groups:
         row = prev_wit_data_end + 1
         prev_wit_data_end = row
@@ -385,10 +363,6 @@ def build_summary(wb, r, prop):
         ws.cell(row=row, column=5, value=item["desc"])
         c = ws.cell(row=row, column=7, value=item["amount"])
         c.number_format = '#,##0.00;[Red]-#,##0.00'
-        if first_prev_wit_note:
-            wc(row, 9, "Previous month's GL withdrawal outstanding items updates here",
-               italic=True, color="595959")
-            first_prev_wit_note = False
 
     # ── Current disbursements ─────────────────────────────────────────────────
     curr_wit_hdr = prev_wit_data_end + 2
@@ -397,7 +371,6 @@ def build_summary(wb, r, prop):
     curr_wit_data_start = curr_wit_hdr + 2
     curr_wit_data_end   = curr_wit_data_start - 1
 
-    first_curr_wit_note = True
     for item in curr_wit_groups:
         row = curr_wit_data_end + 1
         curr_wit_data_end = row
@@ -409,38 +382,28 @@ def build_summary(wb, r, prop):
         ws.cell(row=row, column=5, value=item["desc"])
         c = ws.cell(row=row, column=7, value=item["amount"])
         c.number_format = '#,##0.00;[Red]-#,##0.00'
-        if first_curr_wit_note:
-            wc(row, 9, "Reporting month's GL withdrawal outstanding items updates here",
-               italic=True, color="595959")
-            first_curr_wit_note = False
 
     total_gl_wit_row = curr_wit_data_end + 2
     wc(total_gl_wit_row, 6, "Total")
     c = ws.cell(row=total_gl_wit_row, column=7, value=total_unrec_gl_wit)
     c.number_format = '#,##0.00;[Red]-#,##0.00'
-    wc(total_gl_wit_row, 9, "Total Withdrawal", italic=True, color="595959")
 
     sub_total_row = total_gl_wit_row + 2
     wc(sub_total_row, 6, "Sub Total")
     c = ws.cell(row=sub_total_row, column=7, value=gl_sub_total)
     c.number_format = '#,##0.00;[Red]-#,##0.00'
-    wc(sub_total_row, 9, "Total Outstanding (Deposits + Withdrawal)", italic=True, color="595959")
 
     adj_book_row = sub_total_row + 2
     wc(adj_book_row, 6, "Adjusted book balance", bold=True)
     c = ws.cell(row=adj_book_row, column=8, value=adjusted_book)
     c.number_format = '#,##0.00;[Red]-#,##0.00'
     c.font = Font(bold=True)
-    wc(adj_book_row, 9, "Total (GL's closing balance - Total Outstanding)", italic=True, color="595959")
 
     var_row = adj_book_row + 2
     wc(var_row, 6, "Variance (s/b zero)", bold=True)
     c = ws.cell(row=var_row, column=8, value=variance)
     c.number_format = '#,##0.00;[Red]-#,##0.00'
     c.font = Font(bold=True, color="FF0000" if abs(variance) > 0.01 else "000000")
-    wc(var_row, 9,
-       "Variance (Adjusted Bank balance - Adjusted GL balance) this variance section should always be zero",
-       italic=True, color="595959")
 
     # ── Coding legend ─────────────────────────────────────────────────────────
     legend_row = var_row + 5
@@ -539,7 +502,7 @@ def build_gl(wb, r, prop):
     ws = wb.create_sheet("GL")
     ws.sheet_view.showGridLines = False
 
-    for col, w in zip("ABCDEFGHIJK", [18, 13, 12, 16, 36, 36, 14, 14, 14, 16, 8]):
+    for col, w in zip("ABCDEFGHIJKL", [18, 13, 12, 16, 36, 36, 16, 14, 14, 14, 16, 8]):
         ws.column_dimensions[col].width = w
 
     all_gl    = r["all_gl"]
@@ -569,12 +532,12 @@ def build_gl(wb, r, prop):
     ws.cell(row=3, column=2, value=f"Detail Date Range: {date_range_str}")
     ws.cell(row=4, column=1, value=prop.gl_account_id)
     gl_opening = r.get("gl_opening_balance", 0.0) or 0.0
-    c = ws.cell(row=4, column=9, value=gl_opening)
+    c = ws.cell(row=4, column=10, value=gl_opening)
     c.number_format = '#,##0.00'
 
     # ── Column headers ────────────────────────────────────────────────────────
     hdr_labels = ["Property Name", "Date", "Control", "Reference", "Description",
-                  "Remarks", "Debit", "Credit", "Balance", "Reconcile Date ", "Code"]
+                  "Remarks", "Deposit Number", "Debit", "Credit", "Balance", "Reconcile Date ", "Code"]
     hdr_font = Font(bold=True, size=10)
     for col, lbl in enumerate(hdr_labels, 1):
         c = ws.cell(row=5, column=col, value=lbl)
@@ -607,33 +570,34 @@ def build_gl(wb, r, prop):
         ws.cell(row=data_row, column=4, value=g.get("ref", ""))
         ws.cell(row=data_row, column=5, value=g.get("desc", ""))
         ws.cell(row=data_row, column=6, value=g.get("remarks", ""))
+        ws.cell(row=data_row, column=7, value=g.get("deposit_num", ""))
 
         if dr:
-            c = ws.cell(row=data_row, column=7, value=dr)
+            c = ws.cell(row=data_row, column=8, value=dr)
             c.number_format = '#,##0.00'
         if cr:
-            c = ws.cell(row=data_row, column=8, value=cr)
+            c = ws.cell(row=data_row, column=9, value=cr)
             c.number_format = '#,##0.00'
 
-        c = ws.cell(row=data_row, column=9, value=running_balance)
+        c = ws.cell(row=data_row, column=10, value=running_balance)
         c.number_format = '#,##0.00'
 
         if rec_date:
-            ws.cell(row=data_row, column=10, value=rec_date)
-        ws.cell(row=data_row, column=11, value=code)
+            ws.cell(row=data_row, column=11, value=rec_date)
+        ws.cell(row=data_row, column=12, value=code)
 
         data_row += 1
 
     # ── Total row ─────────────────────────────────────────────────────────────
     total_row = data_row
     ws.cell(row=total_row, column=6, value="Total:").font = Font(bold=True)
-    c = ws.cell(row=total_row, column=7, value=round(total_dr, 2))
+    c = ws.cell(row=total_row, column=8, value=round(total_dr, 2))
     c.number_format = '#,##0.00'
     c.font = Font(bold=True)
-    c = ws.cell(row=total_row, column=8, value=round(total_cr, 2))
+    c = ws.cell(row=total_row, column=9, value=round(total_cr, 2))
     c.number_format = '#,##0.00'
     c.font = Font(bold=True)
-    c = ws.cell(row=total_row, column=9, value=running_balance)
+    c = ws.cell(row=total_row, column=10, value=running_balance)
     c.number_format = '#,##0.00'
     c.font = Font(bold=True)
 
@@ -645,14 +609,14 @@ def build_gl(wb, r, prop):
     sum_row_with = total_row + 5
 
     ws.cell(row=sum_row_dep, column=6, value=1)
-    c = ws.cell(row=sum_row_dep, column=7, value=unrec_dep_gl)
+    c = ws.cell(row=sum_row_dep, column=8, value=unrec_dep_gl)
     c.number_format = '#,##0.00'
-    ws.cell(row=sum_row_dep, column=8, value="Un- Reconciled Deposits")
+    ws.cell(row=sum_row_dep, column=9, value="Un- Reconciled Deposits")
 
     ws.cell(row=sum_row_with, column=6, value=-1)
-    c = ws.cell(row=sum_row_with, column=7, value=-unrec_with_gl)
+    c = ws.cell(row=sum_row_with, column=8, value=-unrec_with_gl)
     c.number_format = '#,##0.00;[Red]-#,##0.00'
-    ws.cell(row=sum_row_with, column=8, value="Un-Reconciled Withdrawals")
+    ws.cell(row=sum_row_with, column=9, value="Un-Reconciled Withdrawals")
 
     ws.freeze_panes = "A6"
     return ws

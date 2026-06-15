@@ -84,10 +84,11 @@ def seed_db(con, property_code: str, prior: PriorItems, source_period: str) -> i
                          chk, b["description"])
         occ[key] += 1
         cur = con.execute("""
-            INSERT OR IGNORE INTO bank_txns
+            INSERT INTO bank_txns
               (txn_hash, property_code, date, amount_cents, check_number,
                description, status, source_period)
             VALUES (?,?,?,?,?,?,'unmatched',?)
+            ON CONFLICT (txn_hash) DO NOTHING
         """, (h, property_code, _as_date(b["date"]), cents, chk,
               b["description"], source_period))
         n += cur.rowcount
@@ -100,11 +101,12 @@ def seed_db(con, property_code: str, prior: PriorItems, source_period: str) -> i
                        g["reference"], dc, cc, g["description"], g["remarks"])
         occ[key] += 1
         cur = con.execute("""
-            INSERT OR IGNORE INTO gl_txns
+            INSERT INTO gl_txns
               (txn_hash, property_code, property_label, date, control, reference,
                description, remarks, debit_cents, credit_cents, deposit_number,
                tenant_code, status, source_period)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'unmatched',?)
+            ON CONFLICT (txn_hash) DO NOTHING
         """, (h, property_code, g.get("property_label", ""), _as_date(g["date"]),
               g["control"], g["reference"], g["description"], g["remarks"],
               dc, cc, g.get("deposit_number", ""), g.get("tenant_code", ""),
