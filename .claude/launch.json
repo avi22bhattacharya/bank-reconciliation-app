@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "bank-rec-dashboard",
+      "runtimeExecutable": "/Users/avibhattacharya/Desktop/bank_rec_automation/.env/bin/streamlit",
+      "runtimeArgs": ["run", "/Users/avibhattacharya/Desktop/bank_rec_automation/app.py", "--server.headless", "true", "--server.port", "8765", "--server.fileWatcherType", "none"],
+      "port": 8765
+    }
+  ]
+}
