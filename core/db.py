@@ -172,12 +172,14 @@ class _Conn:
             self._raw.commit()
         else:
             self._raw.executescript(schema)
-            # Migration: add results_data column to existing SQLite table
-            try:
+            # Migration: add results_data column to existing SQLite table.
+            # PRAGMA check avoids the failed ALTER TABLE that would leave an
+            # uncommitted broken transaction and break all subsequent commit()s.
+            cols = {row[1] for row in
+                    self._raw.execute("PRAGMA table_info(runs)").fetchall()}
+            if "results_data" not in cols:
                 self._raw.execute("ALTER TABLE runs ADD COLUMN results_data TEXT")
                 self._raw.commit()
-            except Exception:
-                pass
 
     def execute(self, sql: str, params=None) -> _Cursor:
         if self._is_pg:
@@ -205,14 +207,17 @@ DB_PATH = Path(__file__).resolve().parent.parent / "data" / "bank_rec.db"
 
 def connect(db_path: str | Path | None = None) -> _Conn:
     """Return a _Conn backed by PostgreSQL (if secrets configured) or SQLite."""
+    pg = None
     try:
         import streamlit as st
         url = st.secrets["postgres"]["url"]
         import psycopg2
         pg = psycopg2.connect(url)
-        return _Conn(pg, is_pg=True, schema=_SCHEMA_PG)
     except Exception:
-        pass
+        pg = None
+
+    if pg is not None:
+        return _Conn(pg, is_pg=True, schema=_SCHEMA_PG)
 
     # SQLite fallback for local dev
     path = Path(db_path if db_path is not None else DB_PATH)
