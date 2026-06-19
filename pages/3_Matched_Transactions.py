@@ -5,7 +5,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from core import db
+from core import db, persist
 from core.auth import require_login
 
 st.set_page_config(page_title="Matched Transactions", page_icon="✅", layout="wide")
@@ -66,11 +66,48 @@ else:
 
 st.divider()
 st.subheader("Run history")
-runs = con.execute("""SELECT run_id, period, gl_type, run_at, status, prior_source, output_path
+runs = con.execute("""SELECT run_id, period, gl_type, run_at, status, prior_source
                       FROM runs WHERE property_code = ? ORDER BY run_id DESC""",
                    (prop_code,)).fetchall()
-if runs:
+if not runs:
+    st.caption("No runs recorded.")
+else:
     rdf = pd.DataFrame([dict(r) for r in runs])
     st.dataframe(rdf, hide_index=True)
-else:
-    st.caption("No runs recorded.")
+
+    with st.expander("Cancel a run"):
+        st.warning(
+            "Cancelling a run permanently removes all transactions and matches "
+            "it introduced. Prior-period carryover rows matched by the run are "
+            "reverted to unmatched. This cannot be undone.")
+
+        run_labels = {
+            f"#{r['run_id']} — {r['period']}  [{r['status']}]  {r['run_at'][:16]}": r
+            for r in runs
+        }
+        chosen_label = st.selectbox("Run to cancel", list(run_labels.keys()),
+                                    key="cancel_run_select")
+        chosen = run_labels[chosen_label]
+
+        n_manual = persist.manual_matches_at_risk(con, prop_code, chosen["period"]) \
+            if chosen["status"] != "superseded" else 0
+        if n_manual:
+            st.error(f"This run has **{n_manual} manual match(es)** that will also be deleted.")
+
+        confirmed = st.checkbox("I understand this is permanent", key="cancel_run_confirm")
+        if st.button("Cancel run", type="primary", disabled=not confirmed,
+                     key="cancel_run_btn"):
+            try:
+                summary = persist.cancel_run(con, chosen["run_id"])
+                st.success(
+                    f"Run #{chosen['run_id']} removed — "
+                    f"{summary['matches_deleted']} match(es), "
+                    f"{summary['bank_deleted']} bank txn(s), "
+                    f"{summary['gl_deleted']} GL txn(s) deleted.")
+                # Clear any stale session state referencing this run
+                for key in ("last_run_id", "last_output_bytes", "last_output_filename",
+                            "last_run_sig", "regen_bytes", "regen_filename"):
+                    st.session_state.pop(key, None)
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to cancel run: {e}")

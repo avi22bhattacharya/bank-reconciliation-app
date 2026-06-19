@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-Clear data from bank_rec.db.
+Clear data from the PostgreSQL (Supabase) database.
+
+Reads the connection URL from .streamlit/secrets.toml.
 
 Usage:
     python clear_db.py              # interactive menu
@@ -10,23 +12,39 @@ Usage:
 """
 
 import argparse
-import sqlite3
 import sys
+import tomllib
 from pathlib import Path
 
-DB_PATH = Path(__file__).resolve().parent / "data" / "bank_rec.db"
+import psycopg2
+
+SECRETS_PATH = Path(__file__).resolve().parent / ".streamlit" / "secrets.toml"
 
 # Delete order matters — children before parents (FK constraints)
-TABLES_ALL = ["bank_txns", "gl_txns", "matches", "runs", "properties"]
+TABLES_ALL  = ["bank_txns", "gl_txns", "matches", "runs", "properties"]
 TABLES_RUNS = ["bank_txns", "gl_txns", "matches", "runs"]
 TABLES_TXNS = ["bank_txns", "gl_txns"]
 
 
-def row_counts(con: sqlite3.Connection) -> dict[str, int]:
-    return {
-        t: con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
-        for t in TABLES_ALL
-    }
+def get_url() -> str:
+    if not SECRETS_PATH.exists():
+        print(f"Secrets file not found: {SECRETS_PATH}")
+        sys.exit(1)
+    with open(SECRETS_PATH, "rb") as f:
+        secrets = tomllib.load(f)
+    try:
+        return secrets["postgres"]["url"]
+    except KeyError:
+        print("No [postgres] url found in secrets.toml")
+        sys.exit(1)
+
+
+def row_counts(cur) -> dict[str, int]:
+    counts = {}
+    for t in TABLES_ALL:
+        cur.execute(f"SELECT COUNT(*) FROM {t}")
+        counts[t] = cur.fetchone()[0]
+    return counts
 
 
 def print_counts(counts: dict[str, int], header: str = "Current row counts:") -> None:
@@ -41,18 +59,19 @@ def confirm(prompt: str) -> bool:
     return answer == "y"
 
 
-def clear_tables(con: sqlite3.Connection, tables: list[str]) -> None:
-    con.execute("PRAGMA foreign_keys = OFF")
-    for table in tables:
-        before = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-        con.execute(f"DELETE FROM {table}")
-        print(f"  Cleared {table:<20} ({before} rows removed)")
-    con.execute("PRAGMA foreign_keys = ON")
+def clear_tables(con, tables: list[str]) -> None:
+    with con.cursor() as cur:
+        for table in tables:
+            cur.execute(f"SELECT COUNT(*) FROM {table}")
+            before = cur.fetchone()[0]
+            cur.execute(f"DELETE FROM {table}")
+            print(f"  Cleared {table:<20} ({before} rows removed)")
     con.commit()
 
 
-def interactive(con: sqlite3.Connection) -> None:
-    print_counts(row_counts(con))
+def interactive(con) -> None:
+    with con.cursor() as cur:
+        print_counts(row_counts(cur))
     print("What would you like to clear?")
     print("  1. Transactions only      (bank_txns, gl_txns)")
     print("  2. Runs + transactions    (runs, matches, bank_txns, gl_txns)")
@@ -73,38 +92,43 @@ def interactive(con: sqlite3.Connection) -> None:
         print("Cancelled.")
         return
 
-    print_counts(row_counts(con), header="Row counts after clear:")
+    with con.cursor() as cur:
+        print_counts(row_counts(cur), header="Row counts after clear:")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Clear bank_rec.db data")
+    parser = argparse.ArgumentParser(description="Clear the Supabase PostgreSQL database")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--all",  action="store_true", help="Wipe all tables")
     group.add_argument("--runs", action="store_true", help="Clear runs, matches, and txns")
     group.add_argument("--txns", action="store_true", help="Clear bank_txns and gl_txns only")
     args = parser.parse_args()
 
-    if not DB_PATH.exists():
-        print(f"Database not found: {DB_PATH}")
-        sys.exit(1)
-
-    con = sqlite3.connect(DB_PATH)
+    url = get_url()
+    print(f"Connecting to PostgreSQL…")
+    con = psycopg2.connect(url)
 
     if args.all:
-        print_counts(row_counts(con))
+        with con.cursor() as cur:
+            print_counts(row_counts(cur))
         if confirm("Wipe the entire database (including property configs)?"):
             clear_tables(con, TABLES_ALL)
-            print_counts(row_counts(con), header="Row counts after clear:")
+            with con.cursor() as cur:
+                print_counts(row_counts(cur), header="Row counts after clear:")
     elif args.runs:
-        print_counts(row_counts(con))
+        with con.cursor() as cur:
+            print_counts(row_counts(cur))
         if confirm("Clear runs, matches, and all transactions?"):
             clear_tables(con, TABLES_RUNS)
-            print_counts(row_counts(con), header="Row counts after clear:")
+            with con.cursor() as cur:
+                print_counts(row_counts(cur), header="Row counts after clear:")
     elif args.txns:
-        print_counts(row_counts(con))
+        with con.cursor() as cur:
+            print_counts(row_counts(cur))
         if confirm("Clear all bank and GL transactions?"):
             clear_tables(con, TABLES_TXNS)
-            print_counts(row_counts(con), header="Row counts after clear:")
+            with con.cursor() as cur:
+                print_counts(row_counts(cur), header="Row counts after clear:")
     else:
         interactive(con)
 

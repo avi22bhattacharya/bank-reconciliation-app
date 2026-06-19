@@ -285,3 +285,63 @@ def save_run(con, *, property_code: str, gl_type: str, period: str,
     except Exception:
         con.rollback()
         raise
+
+
+def cancel_run(con, run_id: int) -> dict:
+    """Undo a reconciliation run and remove all its effects from the DB.
+
+    For active runs: reverts matched/internal transactions to unmatched,
+    deletes current-period transactions, deletes all associated matches,
+    then deletes the run record.
+
+    For superseded runs: data was already cleaned when the next run was
+    created, so only the run record is deleted.
+
+    Returns a summary dict with counts of what was removed.
+    """
+    run = con.execute("SELECT * FROM runs WHERE run_id = ?",
+                      (run_id,)).fetchone()
+    if run is None:
+        raise ValueError(f"Run {run_id} not found")
+
+    summary = {"matches_deleted": 0, "bank_deleted": 0, "gl_deleted": 0}
+    try:
+        if run["status"] != "superseded":
+            property_code = run["property_code"]
+            period = run["period"]
+
+            # Collect match IDs for this run (includes manual matches)
+            match_ids = [r["match_id"] for r in con.execute(
+                "SELECT match_id FROM matches WHERE run_id = ?", (run_id,))]
+            summary["matches_deleted"] = len(match_ids)
+
+            if match_ids:
+                mph = ",".join("?" * len(match_ids))
+                for table in ("bank_txns", "gl_txns"):
+                    con.execute(
+                        f"UPDATE {table} SET status='unmatched', match_id=NULL,"
+                        f" matched_run_id=NULL WHERE match_id IN ({mph})", match_ids)
+                con.execute(f"DELETE FROM matches WHERE match_id IN ({mph})", match_ids)
+
+            # Revert any carryover (prior-period) transactions matched by this run
+            con.execute("""UPDATE bank_txns SET status='unmatched', match_id=NULL,
+                           matched_run_id=NULL WHERE matched_run_id = ?""", (run_id,))
+            con.execute("""UPDATE gl_txns SET status='unmatched', match_id=NULL,
+                           matched_run_id=NULL WHERE matched_run_id = ?""", (run_id,))
+
+            # Delete transactions introduced by this run (sourced from its period)
+            cur = con.execute(
+                "DELETE FROM bank_txns WHERE property_code = ? AND source_period = ?",
+                (property_code, period))
+            summary["bank_deleted"] = cur.rowcount
+            cur = con.execute(
+                "DELETE FROM gl_txns WHERE property_code = ? AND source_period = ?",
+                (property_code, period))
+            summary["gl_deleted"] = cur.rowcount
+
+        con.execute("DELETE FROM runs WHERE run_id = ?", (run_id,))
+        con.commit()
+        return summary
+    except Exception:
+        con.rollback()
+        raise
