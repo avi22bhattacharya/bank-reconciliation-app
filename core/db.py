@@ -229,7 +229,19 @@ def connect(db_path: str | Path | None = None) -> _Conn:
 
     if pg_url is not None:
         import psycopg2
-        pg = psycopg2.connect(pg_url)   # propagate; don't swallow
+        try:
+            pg = psycopg2.connect(pg_url, connect_timeout=15)
+        except psycopg2.OperationalError as exc:
+            # psycopg2 embeds the full connection URL (with password) in the
+            # error message, which Streamlit Cloud redacts and shows as a
+            # generic "data leak prevention" error.  Re-raise with a clean
+            # message so the real diagnosis is visible in the UI.
+            raise RuntimeError(
+                "Cannot connect to PostgreSQL. "
+                "If you are on the Supabase free tier, your project may be "
+                "paused — open the Supabase dashboard and click 'Restore'. "
+                f"(psycopg2 reported: {type(exc).__name__})"
+            ) from None
         return _Conn(pg, is_pg=True, schema=_SCHEMA_PG)
 
     # SQLite fallback — only reached when no postgres secret exists
