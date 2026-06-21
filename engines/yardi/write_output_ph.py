@@ -16,7 +16,7 @@ prop_label_bank, prop_display).
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from datetime import datetime
-from collections import OrderedDict
+from collections import defaultdict, OrderedDict
 import calendar
 
 # ── Styles ────────────────────────────────────────────────────────────────────
@@ -503,11 +503,40 @@ def build_gl(wb, r, prop):
     ws = wb.create_sheet("GL")
     ws.sheet_view.showGridLines = False
 
-    for col, w in zip("ABCDEFGHIJKL", [18, 13, 12, 16, 36, 36, 16, 14, 14, 14, 16, 8]):
+    for col, w in zip("ABCDEFGHIJKLM", [18, 13, 12, 16, 36, 36, 16, 14, 14, 14, 16, 8, 14]):
         ws.column_dimensions[col].width = w
 
     all_gl    = r["all_gl"]
     bank_by_id = {b["id"]: b for b in r["all_bank"]}
+
+    # Pre-compute net amounts for P3/P5/P6/P7 matched GL rows.
+    # Net = sum(debit) - sum(credit) for all GL rows in the same match group.
+    # Positive → deposit; negative → withdrawal.
+    def _net_key(g):
+        rule = g.get("match_rule", "") or ""
+        if rule.startswith("Check #"):
+            return ("check", g.get("ref", "") or "")
+        if rule.startswith("LAKESHORE EMPLOYMENT → LSE ref"):
+            return ("lse", g.get("ref", "") or "")
+        if rule in ("LAKESHOREMANAGEM Settlement", "LAKESHOREMANAGEM Return", "YARDI CARD DEP"):
+            return ("dep", g.get("deposit_num", "") or "")
+        return None
+
+    _net_groups: dict = defaultdict(list)
+    for _g in all_gl:
+        _k = _net_key(_g)
+        if _k is not None:
+            _net_groups[_k].append(_g)
+    _net_by_key = {
+        k: round(sum(x.get("debit", 0) or 0 for x in rows)
+                 - sum(x.get("credit", 0) or 0 for x in rows), 2)
+        for k, rows in _net_groups.items()
+    }
+    gl_net_amount = {}
+    for _g in all_gl:
+        _k = _net_key(_g)
+        if _k is not None:
+            gl_net_amount[_g["id"]] = _net_by_key[_k]
 
     # Derive date range and period info from all_gl + bank
     gl_dates  = [parse_date2(g.get("date")) for g in all_gl if g.get("date")]
@@ -538,7 +567,7 @@ def build_gl(wb, r, prop):
 
     # ── Column headers ────────────────────────────────────────────────────────
     hdr_labels = ["Property Name", "Date", "Control", "Reference", "Description",
-                  "Remarks", "Deposit Number", "Debit", "Credit", "Balance", "Reconcile Date ", "Code"]
+                  "Remarks", "Deposit Number", "Debit", "Credit", "Balance", "Reconcile Date ", "Code", "Net Amount"]
     hdr_font = Font(bold=True, size=10)
     for col, lbl in enumerate(hdr_labels, 1):
         c = ws.cell(row=5, column=col, value=lbl)
@@ -586,6 +615,11 @@ def build_gl(wb, r, prop):
         if rec_date:
             ws.cell(row=data_row, column=11, value=rec_date)
         ws.cell(row=data_row, column=12, value=code)
+
+        net_amt = gl_net_amount.get(g["id"])
+        if net_amt is not None:
+            c = ws.cell(row=data_row, column=13, value=net_amt)
+            c.number_format = '#,##0.00;[Red]-#,##0.00'
 
         data_row += 1
 

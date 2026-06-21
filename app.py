@@ -82,12 +82,11 @@ with c1:
                                    type=["xls", "xlsx"], key="bank_up")
 with c2:
     dr_up = None
-    bs_pdf_up = None
     if gl_type == "yardi":
         dr_up = st.file_uploader("Deposit Register (.xlsx) — required for Yardi",
                                  type=["xls", "xlsx"], key="dr_up")
-        bs_pdf_up = st.file_uploader("Bank Statement PDF — required for Yardi",
-                                     type=["pdf"], key="bs_pdf_up")
+    bs_pdf_up = st.file_uploader("Bank Statement PDF (.pdf) — required",
+                                 type=["pdf"], key="bs_pdf_up")
     boot_up = st.file_uploader(
         "Prior Open Items (optional)", type=["xlsx", "xls"], key="boot_up",
         help="Used only when this property has no history in the database yet "
@@ -208,7 +207,7 @@ with st.expander("Property settings (used in the output workbook)", expanded=_ex
 st.subheader("3 · Run reconciliation")
 
 bank_ending_balance = None
-if gl_type == "yardi" and bs_pdf_up is not None:
+if bs_pdf_up is not None:
     bs_pdf_path = stage_upload(bs_pdf_up)
     try:
         bank_ending_balance = parse_bank_pdf.extract_ending_balance(bs_pdf_path)
@@ -223,9 +222,9 @@ if not period or len(period) != 7:
     problems.append("Period must be YYYY-MM.")
 if gl_type == "yardi" and dr_up is None:
     problems.append("Deposit Register is required for Yardi.")
-if gl_type == "yardi" and bs_pdf_up is None:
-    problems.append("Bank Statement PDF is required for Yardi.")
-if gl_type == "yardi" and bs_pdf_up is not None and bank_ending_balance is None:
+if bs_pdf_up is None:
+    problems.append("Bank Statement PDF is required.")
+if bs_pdf_up is not None and bank_ending_balance is None:
     problems.append("Bank ending balance could not be read from the PDF.")
 for p in problems:
     st.error(p)
@@ -304,7 +303,8 @@ if run_clicked:
                     out = pipeline_ma.run_pipeline(
                         workdir, gl_path=gl_path, gl_sheet=gl_sheet,
                         bank_path=bank_path, bank_sheet=bank_sheet,
-                        prop=prop, period=period, prior=prior)
+                        prop=prop, period=period, prior=prior,
+                        bank_ending_balance=bank_ending_balance)
 
             status.update(label="Saving results…")
             output_filename = Path(out["output_path"]).name

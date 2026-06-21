@@ -143,7 +143,8 @@ def rebuild_output(con, run_id: int) -> tuple[bytes, str]:
                 gl_account_label=prop.gl_account_id,
                 wfb_account=prop.account_info,
                 period_start=date(y, m, 1),
-                beginning_balance=stats.get("beginning_balance", 0.0))
+                beginning_balance=stats.get("beginning_balance", 0.0),
+                bank_ending_balance=stats.get("bank_ending_balance"))
 
         xlsx_bytes = Path(tmp_path).read_bytes()
         filename = Path(run["output_path"]).name if run["output_path"] else f"reconciliation_{run_id}.xlsx"

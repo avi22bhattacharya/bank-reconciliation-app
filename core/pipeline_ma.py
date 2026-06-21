@@ -15,7 +15,8 @@ PREV_LABEL = "Prior (prev)"     # must contain "prev" (extra rule A preference)
 
 
 def run_pipeline(workdir, *, gl_path, gl_sheet, bank_path, bank_sheet,
-                 prop: PropertyMeta, period: str, prior: PriorItems) -> dict:
+                 prop: PropertyMeta, period: str, prior: PriorItems,
+                 bank_ending_balance: float | None = None) -> dict:
     """Returns {"results", "results_path", "output_path", "stats"}."""
     workdir = Path(workdir)
     p_label = ingest.period_label(period)            # e.g. "Apr 2026"
@@ -58,10 +59,12 @@ def run_pipeline(workdir, *, gl_path, gl_sheet, bank_path, bank_sheet,
         gl_account_label=prop.gl_account_id,
         wfb_account=prop.account_info,
         period_start=period_start, beginning_balance=beginning_balance,
+        bank_ending_balance=bank_ending_balance,
     )
 
     stats = dict(results["stats"])
     stats["beginning_balance"] = beginning_balance
+    stats["bank_ending_balance"] = bank_ending_balance
     return {"results": results, "results_path": str(results_path),
             "output_path": str(output_path), "stats": stats,
             "prior_refs": prior_refs}

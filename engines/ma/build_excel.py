@@ -164,6 +164,7 @@ def run(data: dict, output_path: str, *,
         property_name: str, property_title: str, property_code: str,
         gl_account_label: str, wfb_account: str,
         period_start: date, beginning_balance: float,
+        bank_ending_balance: float | None = None,
         n_prev_gl: int | None = None, n_prev_bank: int | None = None) -> str:
     """Write the 4-sheet MA output workbook from the reconcile_full results dict."""
     all_bank = data['all_bank']
@@ -386,7 +387,7 @@ def run(data: dict, output_path: str, *,
 
     r = 7
     wss.cell(row=r, column=6, value='Balance per bank at the month end')
-    wss.cell(row=r, column=8, value=0).number_format = CUR
+    wss.cell(row=r, column=8, value=bank_ending_balance if bank_ending_balance is not None else 0).number_format = CUR
     H7_row = r
 
     r += 2

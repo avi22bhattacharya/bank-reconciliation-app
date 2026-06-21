@@ -181,11 +181,19 @@ def run(bank_file, bank_sheet, gl_file, gl_sheet="GL", prev_sheet="Un-Reconcile 
     bank = []
     for i, row in enumerate(wb_bank[bank_sheet].iter_rows(min_row=2, values_only=True)):
         if not any(row): continue
+        date_val = parse_date(row[0])
+        if date_val is None: continue   # skip header rows / non-date rows
         amt  = round(safe_float(row[1]), 2)
-        chk  = str(int(row[2])) if row[2] is not None else None
+        chk  = None
+        if row[2] is not None:
+            try:
+                chk = str(int(float(str(row[2]))))
+            except (ValueError, TypeError):
+                raw = str(row[2]).strip()
+                chk = raw if raw else None
         desc = str(row[3]).strip() if row[3] else ""
         bank.append({
-            "id": f"BANK-{i+2}", "date": parse_date(row[0]),
+            "id": f"BANK-{i+2}", "date": date_val,
             "amount": amt, "check_number": chk, "description": desc,
             "source": current_bank_label,
             "matched": False, "match_ids": [], "match_rule": "",
