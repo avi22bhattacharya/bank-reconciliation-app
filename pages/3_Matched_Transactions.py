@@ -13,13 +13,7 @@ require_login()
 st.title("✅ Matched Transactions")
 
 
-def get_con():
-    if "db_con" not in st.session_state:
-        st.session_state["db_con"] = db.connect()
-    return st.session_state["db_con"]
-
-
-con = get_con()
+con = db.get_or_connect()
 
 props = db.list_properties(con)
 if not props:

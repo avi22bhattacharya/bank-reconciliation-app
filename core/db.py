@@ -212,26 +212,60 @@ DB_PATH = Path(__file__).resolve().parent.parent / "data" / "bank_rec.db"
 
 
 def connect(db_path: str | Path | None = None) -> _Conn:
-    """Return a _Conn backed by PostgreSQL (if secrets configured) or SQLite."""
-    pg = None
+    """Return a _Conn backed by PostgreSQL (if secrets configured) or SQLite.
+
+    Only falls back to SQLite when the postgres secret is genuinely absent
+    (local dev with no secrets.toml). If the secret IS present but the
+    connection fails, the psycopg2 error propagates — silently swallowing it
+    would cause an invisible fallback to an ephemeral SQLite file that loses
+    all data on every Streamlit Cloud reboot.
+    """
+    pg_url = None
     try:
         import streamlit as st
-        url = st.secrets["postgres"]["url"]
-        import psycopg2
-        pg = psycopg2.connect(url)
+        pg_url = st.secrets["postgres"]["url"]
     except Exception:
-        pg = None
+        pass  # secrets not configured → local dev, use SQLite
 
-    if pg is not None:
+    if pg_url is not None:
+        import psycopg2
+        pg = psycopg2.connect(pg_url)   # propagate; don't swallow
         return _Conn(pg, is_pg=True, schema=_SCHEMA_PG)
 
-    # SQLite fallback for local dev
+    # SQLite fallback — only reached when no postgres secret exists
     path = Path(db_path if db_path is not None else DB_PATH)
     path.parent.mkdir(parents=True, exist_ok=True)
     raw = sqlite3.connect(str(path), check_same_thread=False)
     raw.row_factory = sqlite3.Row
     raw.execute("PRAGMA foreign_keys = ON")
     return _Conn(raw, is_pg=False, schema=_SCHEMA_SQLITE)
+
+
+def get_or_connect() -> _Conn:
+    """Return (or create) the per-session DB connection stored in session_state.
+
+    Also pings the connection on each call so stale connections (pooler idle
+    timeout, network interruption) are automatically replaced before any query
+    is attempted.  Import and call this from every page instead of inlining the
+    session_state check.
+    """
+    import streamlit as st
+    import contextlib
+
+    con = st.session_state.get("db_con")
+    if con is not None:
+        try:
+            con.execute("SELECT 1")
+        except Exception:
+            with contextlib.suppress(Exception):
+                con.close()
+            con = None
+
+    if con is None:
+        con = connect()
+        st.session_state["db_con"] = con
+
+    return con
 
 
 # ── Normalisation + hashing ───────────────────────────────────────────────────
