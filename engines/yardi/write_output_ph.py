@@ -513,7 +513,12 @@ def build_gl(wb, r, prop):
     # Net = sum(debit) - sum(credit) for all GL rows in the same match group.
     # Positive → deposit; negative → withdrawal.
     def _net_key(g):
+        # match_rule is set on bank rows, not GL rows — derive it from the
+        # matched bank transaction when the GL row itself has none.
         rule = g.get("match_rule", "") or ""
+        if not rule and g.get("match_ids"):
+            b = bank_by_id.get(g["match_ids"][0])
+            rule = (b.get("match_rule", "") or "") if b else ""
         if rule.startswith("Check #"):
             return ("check", g.get("ref", "") or "")
         if rule.startswith("LAKESHORE EMPLOYMENT → LSE ref"):
