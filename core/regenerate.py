@@ -129,7 +129,8 @@ def rebuild_output(con, run_id: int) -> tuple[bytes, str]:
         if run["gl_type"] == "yardi":
             results = json.loads(stored)
             results = _overlay_yardi(results, groups)
-            write_output_ph.run(results, tmp_path, prop)
+            write_output_ph.run(results, tmp_path, prop,
+                                bank_ending_balance=stats.get("bank_ending_balance"))
         else:
             results = pickle.loads(base64.b64decode(stored))
             results = _overlay_ma(results, groups)

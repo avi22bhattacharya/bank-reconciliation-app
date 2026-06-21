@@ -4,3 +4,4 @@ xlrd==2.0.2
 streamlit==1.58.0
 psycopg2-binary==2.9.10
 bcrypt==4.0.1
+pdfplumber==0.11.4

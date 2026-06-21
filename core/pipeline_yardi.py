@@ -16,7 +16,8 @@ PREV_LABEL = "Prior Unrec GL"   # must contain "Unrec" (write_output_ph contract
 
 def run_pipeline(workdir, *, gl_path, gl_sheet, bank_path, bank_sheet,
                  deposit_register_path, prop: PropertyMeta, period: str,
-                 prior: PriorItems, gl_header_row: int = 5) -> dict:
+                 prior: PriorItems, gl_header_row: int = 5,
+                 bank_ending_balance: float | None = None) -> dict:
     """Returns {"results", "results_path", "output_path", "stats"}."""
     workdir = Path(workdir)
     p_label = ingest.period_label(period)            # e.g. "Mar 2026"
@@ -71,13 +72,15 @@ def run_pipeline(workdir, *, gl_path, gl_sheet, bank_path, bank_sheet,
     )
 
     output_path = workdir / f"{period} {prop.property_name} Bank Rec Output.xlsx"
-    write_output_ph.run(results, str(output_path), prop)
+    write_output_ph.run(results, str(output_path), prop,
+                        bank_ending_balance=bank_ending_balance)
 
     stats = {
         "pct_bank": results["pct_bank"], "pct_gl": results["pct_gl"],
         "total_real_bank": results["total_real_bank"], "total_gl": results["total_gl"],
         "n_matched_bank": results["n_matched_bank"], "n_matched_gl": results["n_matched_gl"],
         "gl_opening_balance": results["gl_opening_balance"],
+        "bank_ending_balance": bank_ending_balance,
         "mh_recon": [list(s) for s in mh_stats],
     }
     return {"results": results, "results_path": str(results_path),

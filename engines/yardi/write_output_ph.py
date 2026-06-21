@@ -155,7 +155,7 @@ def group_unrec_gl(unrec_items):
 # ═══════════════════════════════════════════════════════════════════════════════
 # Sheet 1 – Summary
 # ═══════════════════════════════════════════════════════════════════════════════
-def build_summary(wb, r, prop):
+def build_summary(wb, r, prop, bank_ending_balance: float | None = None):
     ws = wb.create_sheet("Summary", 0)
     ws.sheet_view.showGridLines = False
 
@@ -234,7 +234,8 @@ def build_summary(wb, r, prop):
     gl_sub_total       = round(total_unrec_gl_dep + total_unrec_gl_wit, 2)
 
     adjusted_book  = round(gl_ending - gl_sub_total, 2)
-    bank_ending    = round(adjusted_book + total_outstanding_bank, 2)
+    bank_ending    = (round(bank_ending_balance, 2) if bank_ending_balance is not None
+                      else round(adjusted_book + total_outstanding_bank, 2))
     adjusted_bank  = round(bank_ending - total_outstanding_bank, 2)
     variance       = round(adjusted_bank - adjusted_book, 2)
 
@@ -737,13 +738,14 @@ def build_unrec_transactions(wb, r, prop):
 # ═══════════════════════════════════════════════════════════════════════════════
 # Entry point
 # ═══════════════════════════════════════════════════════════════════════════════
-def run(results: dict, output_path: str, prop) -> str:
+def run(results: dict, output_path: str, prop,
+        bank_ending_balance: float | None = None) -> str:
     """Write the 4-sheet output workbook. `results` is the reconcile_ph dict
     (JSON-serialized form: dates as MM/DD/YYYY strings)."""
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
 
-    build_summary(wb, results, prop)
+    build_summary(wb, results, prop, bank_ending_balance=bank_ending_balance)
     build_bank_statement(wb, results)
     build_gl(wb, results, prop)
     build_unrec_transactions(wb, results, prop)
