@@ -1,16 +1,17 @@
-"""Post-run persistence: write reconciliation results to SQLite.
+"""Post-run persistence: write reconciliation results to PostgreSQL / SQLite.
 
 Within one transaction per run:
   1. Supersede earlier runs of the same (property, period): revert their
-     matches (older-period member rows go back to 'unmatched'), delete the
-     period's transaction rows, mark the runs superseded. Manual matches
-     created off those runs are discarded too (the UI warns first).
-  2. Upsert every engine record by content hash (INSERT OR IGNORE — a
-     still-unreconciled carryover lands on its existing row).
-  3. Apply statuses: 'internal' (stagecoach/contra), 'matched', 'unmatched'.
-     A prior-period row that matched this month flips to 'matched', which is
-     exactly the transition out of the unreconciled set.
-  4. Insert match groups and point member rows at them.
+     matches, delete the period's transaction rows, mark runs superseded.
+  2. Batch-INSERT every engine record by content hash (ON CONFLICT DO NOTHING).
+  3. Batch-UPDATE statuses: 'internal', 'matched', 'unmatched'.
+  4. INSERT match groups (individual — needs RETURNING match_id).
+  5. Batch-UPDATE match_id back onto member rows.
+
+Steps 2, 3, 5 each make ONE round-trip to the database regardless of row
+count, using psycopg2.extras.execute_values on PostgreSQL.  This replaces
+the previous per-row approach that made ~8 000 round-trips for a property
+with 4 000 transactions — causing apparent hangs on remote Supabase.
 """
 
 from __future__ import annotations
@@ -24,6 +25,23 @@ from core.prior_items import clean_check
 from engines.ma.build_excel import assign_codes as ma_assign_codes
 
 _YARDI_INTERNAL_BANK = {"INTERNAL – Stagecoach Sweep", "Contra - Bank"}
+
+_BANK_INSERT_SQL = """
+    INSERT INTO bank_txns
+      (txn_hash, property_code, date, amount_cents, check_number, description,
+       status, source_period, first_seen_run_id)
+    VALUES (?,?,?,?,?,?,'unmatched',?,?)
+    ON CONFLICT (txn_hash) DO NOTHING
+"""
+
+_GL_INSERT_SQL = """
+    INSERT INTO gl_txns
+      (txn_hash, property_code, property_label, date, control, reference,
+       description, remarks, debit_cents, credit_cents, deposit_number,
+       tenant_code, status, source_period, first_seen_run_id)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'unmatched',?,?)
+    ON CONFLICT (txn_hash) DO NOTHING
+"""
 
 
 def manual_matches_at_risk(con, property_code: str, period: str) -> int:
@@ -52,12 +70,10 @@ def _supersede(con, property_code: str, period: str):
             con.execute(f"""UPDATE {table} SET status='unmatched', match_id=NULL,
                             matched_run_id=NULL WHERE match_id IN ({mph})""", match_ids)
         con.execute(f"DELETE FROM matches WHERE match_id IN ({mph})", match_ids)
-    # rows first seen in this period disappear with the superseded run
     con.execute("DELETE FROM bank_txns WHERE property_code = ? AND source_period = ?",
                 (property_code, period))
     con.execute("DELETE FROM gl_txns WHERE property_code = ? AND source_period = ?",
                 (property_code, period))
-    # any remaining rows matched by those runs (older-period carryovers)
     con.execute(f"""UPDATE bank_txns SET status='unmatched', match_id=NULL, matched_run_id=NULL
                     WHERE matched_run_id IN ({ph})""", run_ids)
     con.execute(f"""UPDATE gl_txns SET status='unmatched', match_id=NULL, matched_run_id=NULL
@@ -65,91 +81,19 @@ def _supersede(con, property_code: str, period: str):
     con.execute(f"UPDATE runs SET status='superseded' WHERE run_id IN ({ph})", run_ids)
 
 
-def _upsert_bank(con, property_code, period, run_id, rec, occ, known_hash=None) -> str:
-    """Insert a current-month bank record (occurrence-indexed hash), or just
-    return the carried hash for a prior-month record (its row already exists)."""
-    if known_hash:
-        return known_hash
-    cents = db.to_cents(rec["amount"])
-    chk = clean_check(rec.get("check_number"))
-    key = db.bank_content_key(property_code, rec.get("date"), cents, chk,
-                              rec.get("description"))
-    h = db.bank_hash(property_code, period, occ[key], rec.get("date"), cents, chk,
-                     rec.get("description"))
-    occ[key] += 1
-    con.execute("""
-        INSERT INTO bank_txns
-          (txn_hash, property_code, date, amount_cents, check_number, description,
-           status, source_period, first_seen_run_id)
-        VALUES (?,?,?,?,?,?,'unmatched',?,?)
-        ON CONFLICT (txn_hash) DO NOTHING
-    """, (h, property_code, db.iso_date(rec.get("date")), cents, chk,
-          (rec.get("description") or "").strip(), period, run_id))
-    return h
-
-
-def _upsert_gl(con, property_code, period, run_id, rec, occ, *, desc_key, ref_key,
-               known_hash=None) -> str:
-    if known_hash:
-        return known_hash
-    dc, cc = db.to_cents(rec.get("debit")), db.to_cents(rec.get("credit"))
-    key = db.gl_content_key(property_code, rec.get("date"), rec.get("control"),
-                            rec.get(ref_key), dc, cc, rec.get(desc_key),
-                            rec.get("remarks"))
-    h = db.gl_hash(property_code, period, occ[key], rec.get("date"), rec.get("control"),
-                   rec.get(ref_key), dc, cc, rec.get(desc_key), rec.get("remarks"))
-    occ[key] += 1
-    con.execute("""
-        INSERT INTO gl_txns
-          (txn_hash, property_code, property_label, date, control, reference,
-           description, remarks, debit_cents, credit_cents, deposit_number,
-           tenant_code, status, source_period, first_seen_run_id)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'unmatched',?,?)
-        ON CONFLICT (txn_hash) DO NOTHING
-    """, (h, property_code, (rec.get("property") or rec.get("property_label") or "").strip(),
-          db.iso_date(rec.get("date")), (rec.get("control") or "").strip(),
-          (rec.get(ref_key) or "").strip(), (rec.get(desc_key) or "").strip(),
-          (rec.get("remarks") or "").strip(), dc, cc,
-          rec.get("deposit_num") or rec.get("deposit_number") or "", "",
-          period, run_id))
-    return h
-
-
-def _set_state(con, table, h, status, engine_ref, run_id):
-    # matched_run_id records the run that resolved the row — for 'internal'
-    # too, so superseding that run reverts prior-period rows it resolved
-    # (e.g. last month's closing sweep paired with this month's return).
-    matched_run = run_id if status in ("matched", "internal") else None
-    con.execute(f"""UPDATE {table} SET status=?, engine_ref=?,
-                    matched_run_id=COALESCE(?, matched_run_id)
-                    WHERE txn_hash=?""", (status, engine_ref, matched_run, h))
-
-
-def _insert_match(con, property_code, run_id, rule, bank_hashes, gl_hashes,
-                  bank_cents, gl_cents) -> int:
-    cur = con.execute("""
-        INSERT INTO matches (property_code, run_id, match_rule, is_manual,
-                             matched_at, bank_total_cents, gl_total_cents)
-        VALUES (?,?,?,0,?,?,?) RETURNING match_id
-    """, (property_code, run_id, rule,
-          datetime.now().isoformat(timespec="seconds"), bank_cents, gl_cents))
-    mid = cur.lastrowid
-    for h in bank_hashes:
-        con.execute("UPDATE bank_txns SET match_id=? WHERE txn_hash=?", (mid, h))
-    for h in gl_hashes:
-        con.execute("UPDATE gl_txns SET match_id=? WHERE txn_hash=?", (mid, h))
-    return mid
-
-
 # ── engine-specific result walkers ───────────────────────────────────────────
 
 def _persist_yardi(con, property_code, period, run_id, results, prior_refs):
-    bank_hash_by_id, gl_hash_by_id = {}, {}
     occ_b, occ_g = defaultdict(int), defaultdict(int)
+    bank_hash_by_id: dict[str, str] = {}
+    gl_hash_by_id:   dict[str, str] = {}
+
+    bank_inserts: list[tuple] = []   # rows for batch INSERT
+    bank_states:  list[tuple] = []   # (status, engine_ref, matched_run, hash)
+    gl_inserts:   list[tuple] = []
+    gl_states:    list[tuple] = []
+
     for rec in results["all_bank"]:
-        h = _upsert_bank(con, property_code, period, run_id, rec, occ_b,
-                         known_hash=prior_refs.get(rec["id"]))
-        bank_hash_by_id[rec["id"]] = h
         rule = rec.get("match_rule") or ""
         if rule in _YARDI_INTERNAL_BANK:
             status = "internal"
@@ -157,13 +101,28 @@ def _persist_yardi(con, property_code, period, run_id, results, prior_refs):
             status = "matched"
         else:
             status = "unmatched"
-        _set_state(con, "bank_txns", h, status, rec["id"], run_id)
+        matched_run = run_id if status in ("matched", "internal") else None
+        engine_ref  = rec["id"]
+
+        known = prior_refs.get(rec["id"])
+        if known:
+            h = known
+        else:
+            cents = db.to_cents(rec["amount"])
+            chk   = clean_check(rec.get("check_number"))
+            key   = db.bank_content_key(property_code, rec.get("date"), cents, chk,
+                                        rec.get("description"))
+            h = db.bank_hash(property_code, period, occ_b[key], rec.get("date"),
+                             cents, chk, rec.get("description"))
+            occ_b[key] += 1
+            bank_inserts.append((
+                h, property_code, db.iso_date(rec.get("date")), cents, chk,
+                (rec.get("description") or "").strip(), period, run_id,
+            ))
+        bank_hash_by_id[rec["id"]] = h
+        bank_states.append((status, engine_ref, matched_run, h))
 
     for rec in results["all_gl"]:
-        h = _upsert_gl(con, property_code, period, run_id, rec, occ_g,
-                       desc_key="desc", ref_key="ref",
-                       known_hash=prior_refs.get(rec["id"]))
-        gl_hash_by_id[rec["id"]] = h
         rule = rec.get("match_rule") or ""
         if rule == "Contra - GL":
             status = "internal"
@@ -171,11 +130,44 @@ def _persist_yardi(con, property_code, period, run_id, results, prior_refs):
             status = "matched"
         else:
             status = "unmatched"
-        _set_state(con, "gl_txns", h, status, rec["id"], run_id)
+        matched_run = run_id if status in ("matched", "internal") else None
+        engine_ref  = rec["id"]
 
-    # match groups = connected components of the bank↔GL match_ids graph
-    # (covers 1 bank → N GL and the P9 N bank → 1 GL case)
-    parent = {}
+        known = prior_refs.get(rec["id"])
+        if known:
+            h = known
+        else:
+            dc  = db.to_cents(rec.get("debit"))
+            cc  = db.to_cents(rec.get("credit"))
+            key = db.gl_content_key(property_code, rec.get("date"), rec.get("control"),
+                                    rec.get("ref"), dc, cc, rec.get("desc"),
+                                    rec.get("remarks"))
+            h = db.gl_hash(property_code, period, occ_g[key], rec.get("date"),
+                           rec.get("control"), rec.get("ref"), dc, cc,
+                           rec.get("desc"), rec.get("remarks"))
+            occ_g[key] += 1
+            gl_inserts.append((
+                h, property_code, (rec.get("property") or "").strip(),
+                db.iso_date(rec.get("date")), (rec.get("control") or "").strip(),
+                (rec.get("ref") or "").strip(), (rec.get("desc") or "").strip(),
+                (rec.get("remarks") or "").strip(), dc, cc,
+                rec.get("deposit_num") or "", "",
+                period, run_id,
+            ))
+        gl_hash_by_id[rec["id"]] = h
+        gl_states.append((status, engine_ref, matched_run, h))
+
+    # ── Batch INSERT + state UPDATE (2 round-trips each) ─────────────────────
+    con.bulk_insert(_BANK_INSERT_SQL, bank_inserts)
+    con.bulk_insert(_GL_INSERT_SQL,   gl_inserts)
+    con.bulk_set_state("bank_txns", bank_states)
+    con.bulk_set_state("gl_txns",   gl_states)
+
+    # ── Match groups (union-find → connected components) ─────────────────────
+    bank_by_id = {b["id"]: b for b in results["all_bank"]}
+    gl_by_id   = {g["id"]: g for g in results["all_gl"]}
+
+    parent: dict = {}
 
     def find(x):
         parent.setdefault(x, x)
@@ -187,8 +179,6 @@ def _persist_yardi(con, property_code, period, run_id, results, prior_refs):
     def union(a, b):
         parent[find(a)] = find(b)
 
-    bank_by_id = {b["id"]: b for b in results["all_bank"]}
-    gl_by_id = {g["id"]: g for g in results["all_gl"]}
     for b in results["all_bank"]:
         for gid in (b.get("match_ids") or []):
             union(("b", b["id"]), ("g", gid))
@@ -196,10 +186,14 @@ def _persist_yardi(con, property_code, period, run_id, results, prior_refs):
         for bid in (g.get("match_ids") or []):
             union(("g", g["id"]), ("b", bid))
 
-    comps = defaultdict(lambda: {"b": [], "g": []})
+    comps: dict = defaultdict(lambda: {"b": [], "g": []})
     for node in list(parent):
         comps[find(node)][node[0]].append(node[1])
 
+    bank_mid_rows: list[tuple] = []   # (match_id, txn_hash)
+    gl_mid_rows:   list[tuple] = []
+
+    now = datetime.now().isoformat(timespec="seconds")
     for comp in comps.values():
         if not comp["b"] and not comp["g"]:
             continue
@@ -207,60 +201,126 @@ def _persist_yardi(con, property_code, period, run_id, results, prior_refs):
         for bid in comp["b"]:
             rule = bank_by_id[bid].get("match_rule") or rule
         bank_cents = sum(db.to_cents(bank_by_id[i]["amount"]) for i in comp["b"])
-        gl_cents = sum(db.to_cents(gl_by_id[i].get("debit") or 0)
-                       - db.to_cents(gl_by_id[i].get("credit") or 0) for i in comp["g"])
-        _insert_match(con, property_code, run_id, rule,
-                      [bank_hash_by_id[i] for i in comp["b"]],
-                      [gl_hash_by_id[i] for i in comp["g"]],
-                      bank_cents, gl_cents)
+        gl_cents   = sum(db.to_cents(gl_by_id[i].get("debit")   or 0)
+                       - db.to_cents(gl_by_id[i].get("credit") or 0)
+                       for i in comp["g"])
+        cur = con.execute("""
+            INSERT INTO matches (property_code, run_id, match_rule, is_manual,
+                                 matched_at, bank_total_cents, gl_total_cents)
+            VALUES (?,?,?,0,?,?,?) RETURNING match_id
+        """, (property_code, run_id, rule, now, bank_cents, gl_cents))
+        mid = cur.lastrowid
+        for bid in comp["b"]:
+            bank_mid_rows.append((mid, bank_hash_by_id[bid]))
+        for gid in comp["g"]:
+            gl_mid_rows.append((mid, gl_hash_by_id[gid]))
+
+    # ── Batch match_id UPDATE (1 round-trip each) ─────────────────────────────
+    con.bulk_set_match_id("bank_txns", bank_mid_rows)
+    con.bulk_set_match_id("gl_txns",   gl_mid_rows)
 
 
 def _persist_ma(con, property_code, period, run_id, results, prior_refs):
     bank_code, gl_code, _ = ma_assign_codes(results)
-    bank_hashes, gl_hashes = [], []
     occ_b, occ_g = defaultdict(int), defaultdict(int)
 
+    bank_hashes: list[str] = []
+    gl_hashes:   list[str] = []
+    bank_inserts: list[tuple] = []
+    bank_states:  list[tuple] = []
+    gl_inserts:   list[tuple] = []
+    gl_states:    list[tuple] = []
+
     for bi, rec in enumerate(results["all_bank"]):
-        h = _upsert_bank(con, property_code, period, run_id, rec, occ_b,
-                         known_hash=prior_refs.get(f"B{bi}"))
-        bank_hashes.append(h)
-        code = abs(bank_code[bi])
+        code   = abs(bank_code[bi])
         status = {1: "unmatched", 2: "matched", 3: "matched", 4: "internal"}[code]
-        _set_state(con, "bank_txns", h, status, f"B{bi}", run_id)
+        matched_run = run_id if status in ("matched", "internal") else None
+        engine_ref  = f"B{bi}"
+
+        known = prior_refs.get(f"B{bi}")
+        if known:
+            h = known
+        else:
+            cents = db.to_cents(rec["amount"])
+            chk   = clean_check(rec.get("check_number"))
+            key   = db.bank_content_key(property_code, rec.get("date"), cents, chk,
+                                        rec.get("description"))
+            h = db.bank_hash(property_code, period, occ_b[key], rec.get("date"),
+                             cents, chk, rec.get("description"))
+            occ_b[key] += 1
+            bank_inserts.append((
+                h, property_code, db.iso_date(rec.get("date")), cents, chk,
+                (rec.get("description") or "").strip(), period, run_id,
+            ))
+        bank_hashes.append(h)
+        bank_states.append((status, engine_ref, matched_run, h))
 
     for gi, rec in enumerate(results["all_gl"]):
-        h = _upsert_gl(con, property_code, period, run_id, rec, occ_g,
-                       desc_key="person_desc", ref_key="reference",
-                       known_hash=prior_refs.get(f"G{gi}"))
-        gl_hashes.append(h)
-        code = abs(gl_code[gi])
+        code   = abs(gl_code[gi])
         status = {1: "unmatched", 2: "matched", 3: "matched", 4: "internal"}[code]
-        _set_state(con, "gl_txns", h, status, f"G{gi}", run_id)
+        matched_run = run_id if status in ("matched", "internal") else None
+        engine_ref  = f"G{gi}"
 
+        known = prior_refs.get(f"G{gi}")
+        if known:
+            h = known
+        else:
+            dc  = db.to_cents(rec.get("debit"))
+            cc  = db.to_cents(rec.get("credit"))
+            key = db.gl_content_key(property_code, rec.get("date"), rec.get("control"),
+                                    rec.get("reference"), dc, cc, rec.get("person_desc"),
+                                    rec.get("remarks"))
+            h = db.gl_hash(property_code, period, occ_g[key], rec.get("date"),
+                           rec.get("control"), rec.get("reference"), dc, cc,
+                           rec.get("person_desc"), rec.get("remarks"))
+            occ_g[key] += 1
+            gl_inserts.append((
+                h, property_code, (rec.get("property_label") or "").strip(),
+                db.iso_date(rec.get("date")), (rec.get("control") or "").strip(),
+                (rec.get("reference") or "").strip(), (rec.get("person_desc") or "").strip(),
+                (rec.get("remarks") or "").strip(), dc, cc, "", "",
+                period, run_id,
+            ))
+        gl_hashes.append(h)
+        gl_states.append((status, engine_ref, matched_run, h))
+
+    con.bulk_insert(_BANK_INSERT_SQL, bank_inserts)
+    con.bulk_insert(_GL_INSERT_SQL,   gl_inserts)
+    con.bulk_set_state("bank_txns", bank_states)
+    con.bulk_set_state("gl_txns",   gl_states)
+
+    bank_mid_rows: list[tuple] = []
+    gl_mid_rows:   list[tuple] = []
+
+    now = datetime.now().isoformat(timespec="seconds")
     for bi, info in results["matched_bank"].items():
         gl_idxs = info.get("gl_indices") or []
         if not gl_idxs:
-            continue  # stagecoach internal marker
-        b = results["all_bank"][bi]
+            continue
+        b          = results["all_bank"][bi]
         bank_cents = db.to_cents(b["amount"])
-        gl_cents = sum(db.to_cents(results["all_gl"][gi].get("debit") or 0)
+        gl_cents   = sum(db.to_cents(results["all_gl"][gi].get("debit")   or 0)
                        - db.to_cents(results["all_gl"][gi].get("credit") or 0)
                        for gi in gl_idxs)
-        _insert_match(con, property_code, run_id, info["rule"],
-                      [bank_hashes[bi]], [gl_hashes[gi] for gi in gl_idxs],
-                      bank_cents, gl_cents)
+        cur = con.execute("""
+            INSERT INTO matches (property_code, run_id, match_rule, is_manual,
+                                 matched_at, bank_total_cents, gl_total_cents)
+            VALUES (?,?,?,0,?,?,?) RETURNING match_id
+        """, (property_code, run_id, info["rule"], now, bank_cents, gl_cents))
+        mid = cur.lastrowid
+        bank_mid_rows.append((mid, bank_hashes[bi]))
+        for gi in gl_idxs:
+            gl_mid_rows.append((mid, gl_hashes[gi]))
+
+    con.bulk_set_match_id("bank_txns", bank_mid_rows)
+    con.bulk_set_match_id("gl_txns",   gl_mid_rows)
 
 
 def save_run(con, *, property_code: str, gl_type: str, period: str,
              results: dict, prior_source: str, prior_refs: dict | None = None,
              workdir: str = "", results_path: str = "", output_path: str = "",
              stats: dict | None = None, results_data: str = "") -> int:
-    """Persist one reconciliation run atomically. Returns run_id.
-
-    prior_refs maps engine record keys to existing txn_hashes for injected
-    prior items (Yardi: "BANK-<row>"/"PREV-GL-<row>" ids; MA: "B<i>"/"G<i>"
-    indices) — built by the pipeline, sourced from PriorItems.fetch().
-    """
+    """Persist one reconciliation run atomically. Returns run_id."""
     prior_refs = prior_refs or {}
     try:
         _supersede(con, property_code, period)
@@ -288,17 +348,7 @@ def save_run(con, *, property_code: str, gl_type: str, period: str,
 
 
 def cancel_run(con, run_id: int) -> dict:
-    """Undo a reconciliation run and remove all its effects from the DB.
-
-    For active runs: reverts matched/internal transactions to unmatched,
-    deletes current-period transactions, deletes all associated matches,
-    then deletes the run record.
-
-    For superseded runs: data was already cleaned when the next run was
-    created, so only the run record is deleted.
-
-    Returns a summary dict with counts of what was removed.
-    """
+    """Undo a reconciliation run and remove all its effects from the DB."""
     run = con.execute("SELECT * FROM runs WHERE run_id = ?",
                       (run_id,)).fetchone()
     if run is None:
@@ -308,9 +358,8 @@ def cancel_run(con, run_id: int) -> dict:
     try:
         if run["status"] != "superseded":
             property_code = run["property_code"]
-            period = run["period"]
+            period        = run["period"]
 
-            # Collect match IDs for this run (includes manual matches)
             match_ids = [r["match_id"] for r in con.execute(
                 "SELECT match_id FROM matches WHERE run_id = ?", (run_id,))]
             summary["matches_deleted"] = len(match_ids)
@@ -323,13 +372,11 @@ def cancel_run(con, run_id: int) -> dict:
                         f" matched_run_id=NULL WHERE match_id IN ({mph})", match_ids)
                 con.execute(f"DELETE FROM matches WHERE match_id IN ({mph})", match_ids)
 
-            # Revert any carryover (prior-period) transactions matched by this run
             con.execute("""UPDATE bank_txns SET status='unmatched', match_id=NULL,
                            matched_run_id=NULL WHERE matched_run_id = ?""", (run_id,))
             con.execute("""UPDATE gl_txns SET status='unmatched', match_id=NULL,
                            matched_run_id=NULL WHERE matched_run_id = ?""", (run_id,))
 
-            # Delete transactions introduced by this run (sourced from its period)
             cur = con.execute(
                 "DELETE FROM bank_txns WHERE property_code = ? AND source_period = ?",
                 (property_code, period))

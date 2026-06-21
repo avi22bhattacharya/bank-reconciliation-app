@@ -166,15 +166,23 @@ class _Conn:
     def _apply_schema(self, schema: str):
         if self._is_pg:
             cur = self._raw.cursor()
-            for stmt in schema.split(";"):
-                s = stmt.strip()
-                if s:
-                    cur.execute(s)
-            # Migration: add results_data column to existing tables
-            try:
-                cur.execute("ALTER TABLE runs ADD COLUMN IF NOT EXISTS results_data TEXT")
-            except Exception:
-                pass
+            # Skip DDL when tables already exist — running CREATE TABLE/INDEX
+            # on every connect hits Supabase Transaction Pooler's statement_timeout.
+            cur.execute("SELECT to_regclass('bank_txns')")
+            row = cur.fetchone()
+            already_exists = row[0] is not None
+            if not already_exists:
+                for stmt in schema.split(";"):
+                    s = stmt.strip()
+                    if s:
+                        cur.execute(s)
+            # Migration: add results_data column if missing (idempotent).
+            cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name='runs' AND column_name='results_data'"
+            )
+            if cur.fetchone() is None:
+                cur.execute("ALTER TABLE runs ADD COLUMN results_data TEXT")
             self._raw.commit()
         else:
             self._raw.executescript(schema)
@@ -187,6 +195,10 @@ class _Conn:
                 self._raw.execute("ALTER TABLE runs ADD COLUMN results_data TEXT")
                 self._raw.commit()
 
+    @property
+    def is_pg(self) -> bool:
+        return self._is_pg
+
     def execute(self, sql: str, params=None) -> _Cursor:
         if self._is_pg:
             import psycopg2.extras
@@ -195,6 +207,67 @@ class _Conn:
         else:
             raw_cur = self._raw.cursor()
         return _Cursor(raw_cur, self._is_pg).execute(sql, params)
+
+    def bulk_insert(self, sql: str, rows: list, page_size: int = 500) -> None:
+        """INSERT many rows in one round-trip (execute_values on PG, executemany on SQLite).
+
+        sql uses ? placeholders and a VALUES (?,?,…) clause — the PG path
+        converts it to VALUES %s for execute_values automatically.
+        """
+        if not rows:
+            return
+        if self._is_pg:
+            import psycopg2.extras
+            pg_sql = re.sub(r"VALUES\s*\([^)]+\)", "VALUES %s",
+                            sql.replace("?", "%s"), flags=re.IGNORECASE)
+            cur = self._raw.cursor()
+            psycopg2.extras.execute_values(cur, pg_sql, rows, page_size=page_size)
+        else:
+            self._raw.executemany(sql, rows)
+
+    def bulk_set_state(self, table: str, rows: list) -> None:
+        """Batch-update status / engine_ref / matched_run_id by txn_hash.
+
+        rows: list of (status, engine_ref, matched_run_id_or_None, txn_hash)
+        Uses execute_values FROM VALUES on PG (one round-trip), executemany on SQLite.
+        """
+        if not rows:
+            return
+        if self._is_pg:
+            import psycopg2.extras
+            sql = f"""
+                UPDATE {table}
+                SET status=v.status, engine_ref=v.engine_ref,
+                    matched_run_id=COALESCE(v.mri::bigint, {table}.matched_run_id)
+                FROM (VALUES %s) AS v(status, engine_ref, mri, txn_hash)
+                WHERE {table}.txn_hash=v.txn_hash
+            """
+            cur = self._raw.cursor()
+            psycopg2.extras.execute_values(cur, sql, rows, page_size=500)
+        else:
+            self._raw.executemany(
+                f"UPDATE {table} SET status=?,engine_ref=?,"
+                f"matched_run_id=COALESCE(?,matched_run_id) WHERE txn_hash=?", rows)
+
+    def bulk_set_match_id(self, table: str, rows: list) -> None:
+        """Batch-update match_id by txn_hash.
+
+        rows: list of (match_id, txn_hash)
+        """
+        if not rows:
+            return
+        if self._is_pg:
+            import psycopg2.extras
+            sql = f"""
+                UPDATE {table} SET match_id=v.mid::bigint
+                FROM (VALUES %s) AS v(mid, txn_hash)
+                WHERE {table}.txn_hash=v.txn_hash
+            """
+            cur = self._raw.cursor()
+            psycopg2.extras.execute_values(cur, sql, rows, page_size=500)
+        else:
+            self._raw.executemany(
+                f"UPDATE {table} SET match_id=? WHERE txn_hash=?", rows)
 
     def commit(self):
         self._raw.commit()
