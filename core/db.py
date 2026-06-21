@@ -220,26 +220,36 @@ def connect(db_path: str | Path | None = None) -> _Conn:
     would cause an invisible fallback to an ephemeral SQLite file that loses
     all data on every Streamlit Cloud reboot.
     """
-    pg_url = None
+    pg_params = None
     try:
         import streamlit as st
-        pg_url = st.secrets["postgres"]["url"]
+        s = st.secrets["postgres"]
+        # Prefer separate DSN fields (host/port/dbname/user/password) over a
+        # single URL string.  Passwords that contain URL-special characters
+        # such as & $ * break psycopg2's URL parser — separate fields bypass
+        # URL parsing entirely and handle any password safely.
+        if "host" in s:
+            pg_params = {
+                "host":     s["host"],
+                "port":     int(s.get("port", 6543)),
+                "dbname":   s.get("dbname", "postgres"),
+                "user":     s["user"],
+                "password": s["password"],
+            }
+        elif "url" in s:
+            pg_params = {"dsn": s["url"]}   # legacy fallback for old secrets
     except Exception:
         pass  # secrets not configured → local dev, use SQLite
 
-    if pg_url is not None:
+    if pg_params is not None:
         import psycopg2
         try:
-            pg = psycopg2.connect(pg_url, connect_timeout=15)
+            pg = psycopg2.connect(**pg_params, connect_timeout=15)
         except psycopg2.OperationalError as exc:
-            # psycopg2 embeds the full connection URL (with password) in the
-            # error message, which Streamlit Cloud redacts and shows as a
-            # generic "data leak prevention" error.  Re-raise with a clean
-            # message so the real diagnosis is visible in the UI.
             raise RuntimeError(
-                "Cannot connect to PostgreSQL. "
-                "If you are on the Supabase free tier, your project may be "
-                "paused — open the Supabase dashboard and click 'Restore'. "
+                "Cannot connect to PostgreSQL — check that the [postgres] "
+                "credentials in Streamlit secrets are correct and the "
+                "Supabase project is active. "
                 f"(psycopg2 reported: {type(exc).__name__})"
             ) from None
         return _Conn(pg, is_pg=True, schema=_SCHEMA_PG)
