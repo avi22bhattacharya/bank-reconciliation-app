@@ -30,7 +30,7 @@ _BANK_INSERT_SQL = """
     INSERT INTO bank_txns
       (txn_hash, property_code, date, amount_cents, check_number, description,
        status, source_period, first_seen_run_id)
-    VALUES (?,?,?,?,?,?,'unmatched',?,?)
+    VALUES (?,?,?,?,?,?,?,?,?)
     ON CONFLICT (txn_hash) DO NOTHING
 """
 
@@ -39,7 +39,7 @@ _GL_INSERT_SQL = """
       (txn_hash, property_code, property_label, date, control, reference,
        description, remarks, debit_cents, credit_cents, deposit_number,
        tenant_code, status, source_period, first_seen_run_id)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'unmatched',?,?)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT (txn_hash) DO NOTHING
 """
 
@@ -117,7 +117,7 @@ def _persist_yardi(con, property_code, period, run_id, results, prior_refs):
             occ_b[key] += 1
             bank_inserts.append((
                 h, property_code, db.iso_date(rec.get("date")), cents, chk,
-                (rec.get("description") or "").strip(), period, run_id,
+                (rec.get("description") or "").strip(), "unmatched", period, run_id,
             ))
         bank_hash_by_id[rec["id"]] = h
         bank_states.append((status, engine_ref, matched_run, h))
@@ -152,7 +152,7 @@ def _persist_yardi(con, property_code, period, run_id, results, prior_refs):
                 (rec.get("ref") or "").strip(), (rec.get("desc") or "").strip(),
                 (rec.get("remarks") or "").strip(), dc, cc,
                 rec.get("deposit_num") or "", "",
-                period, run_id,
+                "unmatched", period, run_id,
             ))
         gl_hash_by_id[rec["id"]] = h
         gl_states.append((status, engine_ref, matched_run, h))
@@ -250,7 +250,7 @@ def _persist_ma(con, property_code, period, run_id, results, prior_refs):
             occ_b[key] += 1
             bank_inserts.append((
                 h, property_code, db.iso_date(rec.get("date")), cents, chk,
-                (rec.get("description") or "").strip(), period, run_id,
+                (rec.get("description") or "").strip(), "unmatched", period, run_id,
             ))
         bank_hashes.append(h)
         bank_states.append((status, engine_ref, matched_run, h))
@@ -279,7 +279,7 @@ def _persist_ma(con, property_code, period, run_id, results, prior_refs):
                 db.iso_date(rec.get("date")), (rec.get("control") or "").strip(),
                 (rec.get("reference") or "").strip(), (rec.get("person_desc") or "").strip(),
                 (rec.get("remarks") or "").strip(), dc, cc, "", "",
-                period, run_id,
+                "unmatched", period, run_id,
             ))
         gl_hashes.append(h)
         gl_states.append((status, engine_ref, matched_run, h))
