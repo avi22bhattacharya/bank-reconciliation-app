@@ -177,6 +177,23 @@ def run(bank_file, bank_sheet, gl_file, gl_sheet="GL", prev_sheet="Un-Reconcile 
     _gl_ob_row = next(wb_gl[gl_sheet].iter_rows(min_row=7, max_row=7, values_only=True), None)
     GL_OPENING_BALANCE = float(_gl_ob_row[9]) if (_gl_ob_row and _gl_ob_row[9] is not None) else 0.0
 
+    # Read GL ending balance as the last numeric value in col J (running balance
+    # column, index 9) of the GL sheet.  The mh_recon enriched file strips the
+    # "= Ending Balance =" marker text, but the numeric balance is preserved on
+    # the last data row before the footer.
+    GL_ENDING_BALANCE = None
+    for _row in wb_gl[gl_sheet].iter_rows(min_row=1, values_only=True):
+        _v = _row[9] if len(_row) > 9 else None
+        if _v is None:
+            continue
+        if isinstance(_v, (int, float)):
+            GL_ENDING_BALANCE = float(_v)
+        elif isinstance(_v, str):
+            try:
+                GL_ENDING_BALANCE = float(_v.replace(",", "").strip())
+            except (ValueError, TypeError):
+                pass
+
     # ── Bank Statement ───────────────────────────────────────────────────────
     bank = []
     for i, row in enumerate(wb_bank[bank_sheet].iter_rows(min_row=2, values_only=True)):
@@ -393,12 +410,11 @@ def run(bank_file, bank_sheet, gl_file, gl_sheet="GL", prev_sheet="Un-Reconcile 
             cands = [g for g in gl_by_ref.get(chk, []) if not g["matched"]]
         if not cands: continue
         bank_abs = round(abs(b["amount"]), 2)
-        total_cr = round(sum(g["credit"] for g in cands), 2)
-        if total_cr == bank_abs:
+        # Use net (credit - debit) for the whole ref group — never partial.
+        # Rule: if credits > debits the ref is a withdrawal; net must equal bank abs.
+        net_cr = round(sum(g["credit"] for g in cands) - sum(g["debit"] for g in cands), 2)
+        if net_cr == bank_abs:
             mark_matched(b["id"], [g["id"] for g in cands], f"Check #{chk}")
-        else:
-            ids = fast_subset_sum([(g["id"], c(g["credit"])) for g in cands], c(bank_abs))
-            if ids: mark_matched(b["id"], ids, f"Check #{chk} (subset)")
 
     # ── P4: INTELLIPAY BILLING → "Convenient Payments" (1-3 BD prior window) ─
     _p4_bank = sorted(
@@ -423,18 +439,39 @@ def run(bank_file, bank_sheet, gl_file, gl_sheet="GL", prev_sheet="Un-Reconcile 
     for b in _p5_bank:
         if b["matched"]: continue
         bank_abs = round(abs(b["amount"]), 2)
+        # LSE (payroll) GL entries can be dated same-day as the bank wire
+        # (payroll is posted and wired on the same day) or up to 3 BD before.
         lse_pool = [g for g in all_gl if not g["matched"]
                     and "lse (v0000665)" in g["desc"].lower()
-                    and bd_before(b["date"], g["date"], BD_WITHDRAWAL_LO, BD_WITHDRAWAL_HI)]
+                    and (g["date"] == b["date"]
+                         or bd_before(b["date"], g["date"], BD_WITHDRAWAL_LO, BD_WITHDRAWAL_HI))]
         lse_by_ref = defaultdict(list)
         for g in lse_pool: lse_by_ref[g["ref"]].append(g)
 
+        # Build atomic ref groups: only withdrawal refs (credits > debits → net > 0).
+        # Each ref is taken as a whole — no partial matching within a ref group.
+        ref_atoms = []  # [(ref_key, net_cents, [gl_ids])]
         for ref, grp in lse_by_ref.items():
-            net = round(sum(g["credit"] for g in grp) - sum(g["debit"] for g in grp), 2)
-            if net == bank_abs:
-                mark_matched(b["id"], [g["id"] for g in grp],
-                             f"LAKESHORE EMPLOYMENT → LSE ref {ref} (net)")
-                break
+            ref_net = round(sum(g["credit"] for g in grp) - sum(g["debit"] for g in grp), 2)
+            if ref_net > 0:
+                ref_atoms.append((ref, c(ref_net), [g["id"] for g in grp]))
+
+        if not ref_atoms:
+            continue
+
+        # Subset-sum over ref groups as atomic units to support multi-ref matches.
+        matched_keys = fast_subset_sum(
+            [(ref, net_c) for ref, net_c, _ in ref_atoms], c(bank_abs)
+        )
+        if matched_keys:
+            matched_set = set(matched_keys)
+            all_gids = []
+            rule_refs = sorted(matched_set)
+            for ref, _nc, gids in ref_atoms:
+                if ref in matched_set:
+                    all_gids.extend(gids)
+            mark_matched(b["id"], all_gids,
+                         f"LAKESHORE EMPLOYMENT → LSE ref {'+'.join(rule_refs)} (net)")
 
     # ── P6: LAKESHOREMANAGEM → Deposit Number grouping (1-2 BD prior) ────────
     lks_gl = [g for g in all_gl
@@ -534,11 +571,14 @@ def run(bank_file, bank_sheet, gl_file, gl_sheet="GL", prev_sheet="Un-Reconcile 
     print(f"\nAfter P1-P7: {len(all_bank) - len(after_p7_unmatched)} bank matched, "
           f"{len(after_p7_unmatched)} still unmatched → entering fallback passes P8-P10")
 
-    # ── P8: Amount fallback (±3 BD guard, excl. Lakeshore/Yardi types) ───────
+    # ── P8: Amount fallback (±3 BD guard, deposits only) ─────────────────────
+    # Withdrawal bank entries are never matched by amount fallback — they must be
+    # reconciled by check number (P3), Intellipay (P4), or LSE (P5).
     _p8_bank = sorted(
         [b for b in all_bank
          if b["id"] in set(after_p7_unmatched) and b["date"]
-         and not _is_deposit_type_bank(b["description"])],
+         and not _is_deposit_type_bank(b["description"])
+         and b["amount"] > 0],
         key=lambda b: b["date"]
     )
     for b in _p8_bank:
@@ -594,6 +634,7 @@ def run(bank_file, bank_sheet, gl_file, gl_sheet="GL", prev_sheet="Un-Reconcile 
         "total_real_bank": len(real_bank), "total_gl": len(all_gl),
         "n_matched_bank": len(matched_bank), "n_matched_gl": len(matched_gl),
         "gl_opening_balance": GL_OPENING_BALANCE,
+        "gl_ending_balance":  GL_ENDING_BALANCE,
     }
 
     if json_out:

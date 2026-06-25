@@ -16,7 +16,7 @@ prop_label_bank, prop_display).
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from datetime import datetime
-from collections import defaultdict, OrderedDict
+from collections import OrderedDict
 import calendar
 
 # ── Styles ────────────────────────────────────────────────────────────────────
@@ -208,11 +208,17 @@ def build_summary(wb, r, prop, bank_ending_balance: float | None = None):
     total_unrec_bank_with = round(sum(b.get("amount",0) for b in unrec_bank_withdrawals), 2)
     total_outstanding_bank = round(total_unrec_bank_dep + total_unrec_bank_with, 2)
 
-    # GL ending balance = opening + sum(debits) - sum(credits)
+    # GL ending balance: use the value read directly from the raw GL file's
+    # "= Ending Balance =" footer row — more accurate than recomputing from
+    # all_gl rows, which include prior-period entries and give the wrong total.
     gl_opening = r.get("gl_opening_balance", 0.0) or 0.0
-    total_gl_dr = round(sum(g.get("debit",  0) or 0 for g in all_gl), 2)
-    total_gl_cr = round(sum(g.get("credit", 0) or 0 for g in all_gl), 2)
-    gl_ending   = round(gl_opening + total_gl_dr - total_gl_cr, 2)
+    gl_ending_from_source = r.get("gl_ending_balance")
+    if gl_ending_from_source is not None:
+        gl_ending = round(gl_ending_from_source, 2)
+    else:
+        total_gl_dr = round(sum(g.get("debit",  0) or 0 for g in all_gl), 2)
+        total_gl_cr = round(sum(g.get("credit", 0) or 0 for g in all_gl), 2)
+        gl_ending   = round(gl_opening + total_gl_dr - total_gl_cr, 2)
 
     # Unreconciled GL items
     unrec_gl = [g for g in all_gl if not g.get("matched")]
@@ -503,45 +509,11 @@ def build_gl(wb, r, prop):
     ws = wb.create_sheet("GL")
     ws.sheet_view.showGridLines = False
 
-    for col, w in zip("ABCDEFGHIJKLM", [18, 13, 12, 16, 36, 36, 16, 14, 14, 14, 16, 8, 14]):
+    for col, w in zip("ABCDEFGHIJKL", [18, 13, 12, 16, 36, 36, 16, 14, 14, 14, 16, 8]):
         ws.column_dimensions[col].width = w
 
     all_gl    = r["all_gl"]
     bank_by_id = {b["id"]: b for b in r["all_bank"]}
-
-    # Pre-compute net amounts for P3/P5/P6/P7 matched GL rows.
-    # Net = sum(debit) - sum(credit) for all GL rows in the same match group.
-    # Positive → deposit; negative → withdrawal.
-    def _net_key(g):
-        # match_rule is set on bank rows, not GL rows — derive it from the
-        # matched bank transaction when the GL row itself has none.
-        rule = g.get("match_rule", "") or ""
-        if not rule and g.get("match_ids"):
-            b = bank_by_id.get(g["match_ids"][0])
-            rule = (b.get("match_rule", "") or "") if b else ""
-        if rule.startswith("Check #"):
-            return ("check", g.get("ref", "") or "")
-        if rule.startswith("LAKESHORE EMPLOYMENT → LSE ref"):
-            return ("lse", g.get("ref", "") or "")
-        if rule in ("LAKESHOREMANAGEM Settlement", "LAKESHOREMANAGEM Return", "YARDI CARD DEP"):
-            return ("dep", g.get("deposit_num", "") or "")
-        return None
-
-    _net_groups: dict = defaultdict(list)
-    for _g in all_gl:
-        _k = _net_key(_g)
-        if _k is not None:
-            _net_groups[_k].append(_g)
-    _net_by_key = {
-        k: round(sum(x.get("debit", 0) or 0 for x in rows)
-                 - sum(x.get("credit", 0) or 0 for x in rows), 2)
-        for k, rows in _net_groups.items()
-    }
-    gl_net_amount = {}
-    for _g in all_gl:
-        _k = _net_key(_g)
-        if _k is not None:
-            gl_net_amount[_g["id"]] = _net_by_key[_k]
 
     # Derive date range and period info from all_gl + bank
     gl_dates  = [parse_date2(g.get("date")) for g in all_gl if g.get("date")]
@@ -572,7 +544,7 @@ def build_gl(wb, r, prop):
 
     # ── Column headers ────────────────────────────────────────────────────────
     hdr_labels = ["Property Name", "Date", "Control", "Reference", "Description",
-                  "Remarks", "Deposit Number", "Debit", "Credit", "Balance", "Reconcile Date ", "Code", "Net Amount"]
+                  "Remarks", "Deposit Number", "Debit", "Credit", "Net Amount", "Reconcile Date ", "Code"]
     hdr_font = Font(bold=True, size=10)
     for col, lbl in enumerate(hdr_labels, 1):
         c = ws.cell(row=5, column=col, value=lbl)
@@ -583,7 +555,6 @@ def build_gl(wb, r, prop):
     # ── Data rows ─────────────────────────────────────────────────────────────
     sorted_gl = sorted(all_gl, key=lambda g: (parse_date2(g.get("date")) or datetime.min, g["id"]))
 
-    running_balance = gl_opening
     total_dr = 0.0
     total_cr = 0.0
     data_row = 6
@@ -591,7 +562,6 @@ def build_gl(wb, r, prop):
     for g in sorted_gl:
         dr  = g.get("debit",  0) or 0.0
         cr  = g.get("credit", 0) or 0.0
-        running_balance = round(running_balance + dr - cr, 2)
         total_dr += dr
         total_cr += cr
 
@@ -614,17 +584,14 @@ def build_gl(wb, r, prop):
             c = ws.cell(row=data_row, column=9, value=cr)
             c.number_format = '#,##0.00'
 
-        c = ws.cell(row=data_row, column=10, value=running_balance)
-        c.number_format = '#,##0.00'
+        # Col 10: per-row Net Amount = Debit − Credit
+        row_net = round(dr - cr, 2)
+        c = ws.cell(row=data_row, column=10, value=row_net)
+        c.number_format = '#,##0.00;[Red]-#,##0.00'
 
         if rec_date:
             ws.cell(row=data_row, column=11, value=rec_date)
         ws.cell(row=data_row, column=12, value=code)
-
-        net_amt = gl_net_amount.get(g["id"])
-        if net_amt is not None:
-            c = ws.cell(row=data_row, column=13, value=net_amt)
-            c.number_format = '#,##0.00;[Red]-#,##0.00'
 
         data_row += 1
 
@@ -637,8 +604,8 @@ def build_gl(wb, r, prop):
     c = ws.cell(row=total_row, column=9, value=round(total_cr, 2))
     c.number_format = '#,##0.00'
     c.font = Font(bold=True)
-    c = ws.cell(row=total_row, column=10, value=running_balance)
-    c.number_format = '#,##0.00'
+    c = ws.cell(row=total_row, column=10, value=round(total_dr - total_cr, 2))
+    c.number_format = '#,##0.00;[Red]-#,##0.00'
     c.font = Font(bold=True)
 
     # ── Un-reconciled summary rows ────────────────────────────────────────────
