@@ -105,8 +105,8 @@ def bd_before(bank_date, gl_date, lo, hi):
     return lo <= business_days_apart(bank_date, gl_date) <= hi
 
 # Date-window constants
-BD_LAKESHORE_LO, BD_LAKESHORE_HI = 1, 3   # GL 1-3 BD before bank (3 covers weekend-dated GL entries)
-BD_YARDI_LO,     BD_YARDI_HI     = 1, 6   # GL 1-6 BD before bank
+BD_LAKESHORE_LO, BD_LAKESHORE_HI = 1, 2   # GL 1-2 BD before bank (Q&A doc)
+BD_YARDI_LO,     BD_YARDI_HI     = 2, 6   # GL 2-6 BD before bank (Q&A doc)
 BD_WITHDRAWAL_LO, BD_WITHDRAWAL_HI = 1, 3  # GL 1-3 BD before bank (checks, intellipay, LSE)
 WINDOW_BD = 3                               # P8/P10 catch-all ±3 BD
 
@@ -235,7 +235,8 @@ def run(bank_file, bank_sheet, gl_file, gl_sheet="GL", prev_sheet="Un-Reconcile 
         prop = str(row[1]).strip()  if row[1]  else ""
         dep_raw = str(row[17]).strip() if row[17] else ""
         dep_num = re.sub(r'[^0-9]', '', dep_raw) if dep_raw else ""
-        if is_noncash_gl(ref, desc, remarks): continue
+        # is_noncash_gl filter removed: Contra-GL and other programmatic entries
+        # must appear in the GL tab (marked ±4 by the contra pre-pass if net=0).
         gl.append({
             "id": f"GL-{i+8}", "date": parse_date(row[2]),
             "desc": desc, "control": str(row[5]).strip() if row[5] else "",
