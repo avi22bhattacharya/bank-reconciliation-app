@@ -392,3 +392,43 @@ def cancel_run(con, run_id: int) -> dict:
     except Exception:
         con.rollback()
         raise
+
+
+def clear_property_data(con, property_code: str, delete_property: bool = False) -> dict:
+    """Remove ALL stored data for a property (all runs, matches, and transactions).
+
+    Optionally also removes the property configuration row.
+    Returns a summary dict of how many rows were deleted.
+    """
+    summary = {"runs_deleted": 0, "matches_deleted": 0,
+               "bank_deleted": 0, "gl_deleted": 0}
+    try:
+        match_rows = con.execute(
+            "SELECT match_id FROM matches WHERE property_code = ?",
+            (property_code,)).fetchall()
+        match_ids = [r["match_id"] for r in match_rows]
+        summary["matches_deleted"] = len(match_ids)
+
+        if match_ids:
+            mph = ",".join("?" * len(match_ids))
+            for table in ("bank_txns", "gl_txns"):
+                con.execute(
+                    f"UPDATE {table} SET status='unmatched', match_id=NULL,"
+                    f" matched_run_id=NULL WHERE match_id IN ({mph})", match_ids)
+            con.execute(f"DELETE FROM matches WHERE match_id IN ({mph})", match_ids)
+
+        cur = con.execute("DELETE FROM bank_txns WHERE property_code = ?", (property_code,))
+        summary["bank_deleted"] = cur.rowcount
+        cur = con.execute("DELETE FROM gl_txns WHERE property_code = ?", (property_code,))
+        summary["gl_deleted"] = cur.rowcount
+        cur = con.execute("DELETE FROM runs WHERE property_code = ?", (property_code,))
+        summary["runs_deleted"] = cur.rowcount
+
+        if delete_property:
+            con.execute("DELETE FROM properties WHERE property_code = ?", (property_code,))
+
+        con.commit()
+        return summary
+    except Exception:
+        con.rollback()
+        raise
