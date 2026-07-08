@@ -78,19 +78,25 @@ if f_date:
     gl_display = gl_display[gl_display["Date"].astype(str).str.contains(f_date, na=False)]
 
 # ── Tables ────────────────────────────────────────────────────────────────────
+# Table key suffix increments after each confirmed match so Streamlit discards
+# stale selection state and re-renders the tables from fresh data.
+_tbl_ver = st.session_state.get("match_table_ver", 0)
+
 c1, c2 = st.columns(2)
 with c1:
     st.subheader(f"Unreconciled bank ({len(bank_df)})")
     bank_sel = st.dataframe(
         bank_df.drop(columns=["_hash"]), hide_index=True, height=420,
-        on_select="rerun", selection_mode="multi-row", key="bank_table",
+        on_select="rerun", selection_mode="multi-row",
+        key=f"bank_table_{_tbl_ver}",
         column_config={"Amount": st.column_config.NumberColumn(format="%.2f")})
 with c2:
     filtered_label = f" — {len(gl_display)} shown" if (f_ref or f_desc or f_date) else ""
     st.subheader(f"Unreconciled GL ({len(gl_df)}){filtered_label}")
     gl_sel = st.dataframe(
         gl_display.drop(columns=["_hash"]), hide_index=True, height=420,
-        on_select="rerun", selection_mode="multi-row", key="gl_table",
+        on_select="rerun", selection_mode="multi-row",
+        key=f"gl_table_{_tbl_ver}",
         column_config={"Amount": st.column_config.NumberColumn(format="%.2f")})
 
 # Clamp selection indices to current dataframe bounds to prevent IndexError
@@ -128,6 +134,8 @@ if st.button("Confirm match", type="primary", disabled=not (balanced or force),
     gl_hashes   = gl_display.iloc[gl_idx]["_hash"].tolist()
     match_id = db.create_manual_match(con, prop_code, bank_hashes, gl_hashes,
                                       latest["run_id"])
+    # Bump table key so matched rows are removed from the UI on rerun
+    st.session_state["match_table_ver"] = _tbl_ver + 1
     log = io.StringIO()
     try:
         with contextlib.redirect_stdout(log):
