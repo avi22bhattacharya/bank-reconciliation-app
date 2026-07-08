@@ -105,8 +105,8 @@ def bd_before(bank_date, gl_date, lo, hi):
     return lo <= business_days_apart(bank_date, gl_date) <= hi
 
 # Date-window constants
-BD_LAKESHORE_LO, BD_LAKESHORE_HI = 1, 2   # GL 1-2 BD before bank (Q&A doc)
-BD_YARDI_LO,     BD_YARDI_HI     = 2, 6   # GL 2-6 BD before bank (Q&A doc)
+BD_LAKESHORE_LO, BD_LAKESHORE_HI = 1, 20  # GL 1-20 BD before bank, ascending order
+BD_YARDI_LO,     BD_YARDI_HI     = 1, 20  # GL 1-20 BD before bank, ascending order
 BD_WITHDRAWAL_LO, BD_WITHDRAWAL_HI = 1, 3  # GL 1-3 BD before bank (checks, intellipay, LSE)
 WINDOW_BD = 3                               # P8/P10 catch-all ±3 BD
 
@@ -259,7 +259,8 @@ def run(bank_file, bank_sheet, gl_file, gl_sheet="GL", prev_sheet="Un-Reconcile 
         dep_raw = str(row[13]).strip() if len(row) > 13 and row[13] else ""
         dep_num = re.sub(r'[^0-9]', '', dep_raw) if dep_raw else ""
         if not ref and not desc and not rem: continue
-        if is_noncash_prev_gl(ref, desc, rem): continue
+        # is_noncash_prev_gl filter removed: prior-period Contra entries must
+        # appear in the GL tab (marked ±4 by the contra pre-pass if net=0).
         debit  = round( amt_raw, 2) if amt_raw > 0 else 0.0
         credit = round(-amt_raw, 2) if amt_raw < 0 else 0.0
         prev_gl.append({
@@ -490,48 +491,43 @@ def run(bank_file, bank_sheet, gl_file, gl_sheet="GL", prev_sheet="Un-Reconcile 
         bank_date = b["date"]
 
         if not is_return:
-            # Build deposit-number groups from windowed pool (debit side)
-            windowed = [g for g in lks_gl
-                        if not g["matched"] and g["debit"] > 0
-                        and bd_before(bank_date, g["date"],
-                                      BD_LAKESHORE_LO, BD_LAKESHORE_HI)]
-            dep_grp = defaultdict(list)
-            for g in windowed:
-                dep_grp[g["deposit_num"]].append(g)
-
-            # Find single deposit# whose group sum = bank amount exactly
-            matched_dep = None
-            for dep, rows in dep_grp.items():
-                grp_sum = round(sum(g["debit"] for g in rows), 2)
-                if grp_sum == bank_abs:
-                    matched_dep = dep
+            # Try each BD interval in ascending order — prefer closest GL match
+            for bd in range(BD_LAKESHORE_LO, BD_LAKESHORE_HI + 1):
+                windowed = [g for g in lks_gl
+                            if not g["matched"] and g["debit"] > 0
+                            and bd_before(bank_date, g["date"], bd, bd)]
+                dep_grp = defaultdict(list)
+                for g in windowed:
+                    dep_grp[g["deposit_num"]].append(g)
+                matched_dep = None
+                for dep, rows in dep_grp.items():
+                    if round(sum(g["debit"] for g in rows), 2) == bank_abs:
+                        matched_dep = dep
+                        break
+                if matched_dep:
+                    gids = [g["id"] for g in dep_grp[matched_dep] if not g["matched"]]
+                    mark_matched(b["id"], gids, "LAKESHOREMANAGEM Settlement")
                     break
-
-            if matched_dep:
-                gids = [g["id"] for g in dep_grp[matched_dep] if not g["matched"]]
-                mark_matched(b["id"], gids, "LAKESHOREMANAGEM Settlement")
         else:
-            # Return side: credit entries 1-2 BD before bank date
-            windowed_cr = [g for g in lks_gl
-                           if not g["matched"] and g["credit"] > 0
-                           and bd_before(bank_date, g["date"],
-                                         BD_LAKESHORE_LO, BD_LAKESHORE_HI)]
-            dep_grp_cr = defaultdict(list)
-            for g in windowed_cr:
-                dep_grp_cr[g["deposit_num"]].append(g)
-
-            matched_dep = None
-            for dep, rows in dep_grp_cr.items():
-                grp_sum = round(sum(g["credit"] for g in rows), 2)
-                if grp_sum == bank_abs:
-                    matched_dep = dep
+            # Return side: credit entries, ascending BD interval
+            for bd in range(BD_LAKESHORE_LO, BD_LAKESHORE_HI + 1):
+                windowed_cr = [g for g in lks_gl
+                               if not g["matched"] and g["credit"] > 0
+                               and bd_before(bank_date, g["date"], bd, bd)]
+                dep_grp_cr = defaultdict(list)
+                for g in windowed_cr:
+                    dep_grp_cr[g["deposit_num"]].append(g)
+                matched_dep = None
+                for dep, rows in dep_grp_cr.items():
+                    if round(sum(g["credit"] for g in rows), 2) == bank_abs:
+                        matched_dep = dep
+                        break
+                if matched_dep:
+                    gids = [g["id"] for g in dep_grp_cr[matched_dep] if not g["matched"]]
+                    mark_matched(b["id"], gids, "LAKESHOREMANAGEM Return")
                     break
 
-            if matched_dep:
-                gids = [g["id"] for g in dep_grp_cr[matched_dep] if not g["matched"]]
-                mark_matched(b["id"], gids, "LAKESHOREMANAGEM Return")
-
-    # ── P7: YARDI CARD DEP → Deposit Number grouping (4-6 BD prior) ──────────
+    # ── P7: YARDI CARD DEP → Deposit Number grouping, ascending BD interval ───
     yardi_gl = [g for g in all_gl
                 if gl_is_yardi_type(g["remarks"]) and g["deposit_num"]]
 
@@ -545,24 +541,22 @@ def run(bank_file, bank_sheet, gl_file, gl_sheet="GL", prev_sheet="Un-Reconcile 
         bank_abs  = round(abs(b["amount"]), 2)
         bank_date = b["date"]
 
-        windowed = [g for g in yardi_gl
-                    if not g["matched"] and g["debit"] > 0
-                    and bd_before(bank_date, g["date"], BD_YARDI_LO, BD_YARDI_HI)]
-
-        dep_grp = defaultdict(list)
-        for g in windowed:
-            dep_grp[g["deposit_num"]].append(g)
-
-        matched_dep = None
-        for dep, rows in dep_grp.items():
-            grp_sum = round(sum(g["debit"] for g in rows), 2)
-            if grp_sum == bank_abs:
-                matched_dep = dep
+        for bd in range(BD_YARDI_LO, BD_YARDI_HI + 1):
+            windowed = [g for g in yardi_gl
+                        if not g["matched"] and g["debit"] > 0
+                        and bd_before(bank_date, g["date"], bd, bd)]
+            dep_grp = defaultdict(list)
+            for g in windowed:
+                dep_grp[g["deposit_num"]].append(g)
+            matched_dep = None
+            for dep, rows in dep_grp.items():
+                if round(sum(g["debit"] for g in rows), 2) == bank_abs:
+                    matched_dep = dep
+                    break
+            if matched_dep:
+                gids = [g["id"] for g in dep_grp[matched_dep] if not g["matched"]]
+                mark_matched(b["id"], gids, "YARDI CARD DEP")
                 break
-
-        if matched_dep:
-            gids = [g["id"] for g in dep_grp[matched_dep] if not g["matched"]]
-            mark_matched(b["id"], gids, "YARDI CARD DEP")
 
     # ═══════════════════════════════════════════════════════════════════════════
     # PASS 2 (P8–P10): fallback passes — only for entries still unmatched

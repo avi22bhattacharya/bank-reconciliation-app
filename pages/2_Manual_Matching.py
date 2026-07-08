@@ -37,7 +37,7 @@ if latest is None:
 st.caption(f"Latest run: #{latest['run_id']} · period {latest['period']} · {latest['run_at']}")
 
 bank_rows = db.unmatched_bank(con, prop_code)
-gl_rows = db.unmatched_gl(con, prop_code)
+gl_rows   = db.unmatched_gl(con, prop_code)
 
 if not bank_rows and not gl_rows:
     st.success("Nothing left to match — all transactions are reconciled. 🎉")
@@ -52,10 +52,32 @@ bank_df = pd.DataFrame([{
 gl_df = pd.DataFrame([{
     "Date": r["date"], "Control": r["control"], "Reference": r["reference"],
     "Description": r["description"], "Remarks": r["remarks"],
+    "Deposit #": r["deposit_number"] or "",
     "Amount": (r["debit_cents"] - r["credit_cents"]) / 100.0,
     "Since": r["source_period"], "_hash": r["txn_hash"],
 } for r in gl_rows])
 
+# ── Search / filter controls ──────────────────────────────────────────────────
+with st.expander("🔍 Filter GL rows", expanded=False):
+    fa, fb, fc = st.columns(3)
+    with fa:
+        f_ref  = st.text_input("Reference contains", key="f_ref").strip()
+    with fb:
+        f_desc = st.text_input("Description / Remarks contains", key="f_desc").strip()
+    with fc:
+        f_date = st.text_input("Date contains (e.g. 2026-04)", key="f_date").strip()
+
+gl_display = gl_df.copy()
+if f_ref:
+    gl_display = gl_display[gl_display["Reference"].str.contains(f_ref, case=False, na=False)]
+if f_desc:
+    mask = (gl_display["Description"].str.contains(f_desc, case=False, na=False) |
+            gl_display["Remarks"].str.contains(f_desc, case=False, na=False))
+    gl_display = gl_display[mask]
+if f_date:
+    gl_display = gl_display[gl_display["Date"].astype(str).str.contains(f_date, na=False)]
+
+# ── Tables ────────────────────────────────────────────────────────────────────
 c1, c2 = st.columns(2)
 with c1:
     st.subheader(f"Unreconciled bank ({len(bank_df)})")
@@ -64,17 +86,22 @@ with c1:
         on_select="rerun", selection_mode="multi-row", key="bank_table",
         column_config={"Amount": st.column_config.NumberColumn(format="%.2f")})
 with c2:
-    st.subheader(f"Unreconciled GL ({len(gl_df)})")
+    filtered_label = f" — {len(gl_display)} shown" if (f_ref or f_desc or f_date) else ""
+    st.subheader(f"Unreconciled GL ({len(gl_df)}){filtered_label}")
     gl_sel = st.dataframe(
-        gl_df.drop(columns=["_hash"]), hide_index=True, height=420,
+        gl_display.drop(columns=["_hash"]), hide_index=True, height=420,
         on_select="rerun", selection_mode="multi-row", key="gl_table",
         column_config={"Amount": st.column_config.NumberColumn(format="%.2f")})
 
-bank_idx = bank_sel.selection.rows if bank_sel and bank_sel.selection else []
-gl_idx = gl_sel.selection.rows if gl_sel and gl_sel.selection else []
+# Clamp selection indices to current dataframe bounds to prevent IndexError
+# after a rerun where matched rows are removed and the table is shorter.
+raw_bank_idx = bank_sel.selection.rows if bank_sel and bank_sel.selection else []
+raw_gl_idx   = gl_sel.selection.rows   if gl_sel   and gl_sel.selection   else []
+bank_idx = [i for i in raw_bank_idx if i < len(bank_df)]
+gl_idx   = [i for i in raw_gl_idx   if i < len(gl_display)]
 
 bank_total = round(bank_df.iloc[bank_idx]["Amount"].sum(), 2) if bank_idx else 0.0
-gl_total = round(gl_df.iloc[gl_idx]["Amount"].sum(), 2) if gl_idx else 0.0
+gl_total   = round(gl_display.iloc[gl_idx]["Amount"].sum(), 2) if gl_idx else 0.0
 delta = round(bank_total - gl_total, 2)
 
 t1, t2, t3 = st.columns(3)
@@ -98,14 +125,14 @@ else:
 if st.button("Confirm match", type="primary", disabled=not (balanced or force),
              use_container_width=True):
     bank_hashes = bank_df.iloc[bank_idx]["_hash"].tolist()
-    gl_hashes = gl_df.iloc[gl_idx]["_hash"].tolist()
+    gl_hashes   = gl_display.iloc[gl_idx]["_hash"].tolist()
     match_id = db.create_manual_match(con, prop_code, bank_hashes, gl_hashes,
                                       latest["run_id"])
     log = io.StringIO()
     try:
         with contextlib.redirect_stdout(log):
             regen_bytes, regen_filename = regenerate.rebuild_output(con, latest["run_id"])
-        st.session_state["regen_bytes"] = regen_bytes
+        st.session_state["regen_bytes"]    = regen_bytes
         st.session_state["regen_filename"] = regen_filename
         st.success(f"Match #{match_id} recorded ({len(bank_hashes)} bank ↔ "
                    f"{len(gl_hashes)} GL). Output workbook regenerated.")

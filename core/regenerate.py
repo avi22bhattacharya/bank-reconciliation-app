@@ -28,10 +28,14 @@ def _manual_match_members(con, run_id: int) -> list[dict]:
     for m in con.execute(
             "SELECT match_id FROM matches WHERE run_id = ? AND is_manual = 1", (run_id,)):
         mid = m["match_id"]
+        # Filter None engine_refs — bootstrapped prior items have NULL engine_ref
+        # and cannot be located in the engine results dict by ref.
         bank = [r["engine_ref"] for r in con.execute(
-            "SELECT engine_ref FROM bank_txns WHERE match_id = ?", (mid,))]
+            "SELECT engine_ref FROM bank_txns WHERE match_id = ?", (mid,))
+                if r["engine_ref"] is not None]
         gl = [r["engine_ref"] for r in con.execute(
-            "SELECT engine_ref FROM gl_txns WHERE match_id = ?", (mid,))]
+            "SELECT engine_ref FROM gl_txns WHERE match_id = ?", (mid,))
+              if r["engine_ref"] is not None]
         groups.append({"match_id": mid, "bank": bank, "gl": gl})
     return groups
 
@@ -46,14 +50,18 @@ def _overlay_yardi(results: dict, groups: list[dict]):
                 continue
             b["matched"] = True
             b["match_rule"] = MANUAL_RULE
-            b["match_ids"] = sorted(set((b.get("match_ids") or []) + grp["gl"]))
+            b["match_ids"] = sorted(x for x in
+                                    set((b.get("match_ids") or []) + grp["gl"])
+                                    if x is not None)
         for gref in grp["gl"]:
             g = gl_by_id.get(gref)
             if g is None:
                 continue
             g["matched"] = True
             g["match_rule"] = MANUAL_RULE
-            g["match_ids"] = sorted(set((g.get("match_ids") or []) + grp["bank"]))
+            g["match_ids"] = sorted(x for x in
+                                    set((g.get("match_ids") or []) + grp["bank"])
+                                    if x is not None)
     real_bank = [b for b in results["all_bank"]
                  if b.get("match_rule") != "INTERNAL – Stagecoach Sweep"]
     matched_bank = [b for b in real_bank if b.get("matched")]
