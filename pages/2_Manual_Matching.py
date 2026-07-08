@@ -115,6 +115,15 @@ t1.metric(f"Bank selected ({len(bank_idx)})", f"{bank_total:,.2f}")
 t2.metric(f"GL selected ({len(gl_idx)})", f"{gl_total:,.2f}")
 t3.metric("Difference", f"{delta:,.2f}")
 
+# Download button is always rendered when bytes are ready so it survives
+# the st.stop() that fires when nothing is selected after a confirm rerun.
+if st.session_state.get("regen_bytes"):
+    st.download_button("⬇️ Download updated workbook",
+                       data=st.session_state["regen_bytes"],
+                       file_name=st.session_state.get("regen_filename", "reconciliation.xlsx"),
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       use_container_width=True)
+
 if not bank_idx or not gl_idx:
     st.info("Select at least one bank row and one GL row to record a match.")
     st.stop()
@@ -147,10 +156,3 @@ if st.button("Confirm match", type="primary", disabled=not (balanced or force),
     except Exception as e:
         st.error(f"Match #{match_id} saved, but regenerating the workbook failed: {e}")
     st.rerun()
-
-if st.session_state.get("regen_bytes"):
-    st.download_button("⬇️ Download updated workbook",
-                       data=st.session_state["regen_bytes"],
-                       file_name=st.session_state.get("regen_filename", "reconciliation.xlsx"),
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                       use_container_width=True)
